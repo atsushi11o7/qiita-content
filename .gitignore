@@ -1,0 +1,17 @@
+# 依存パッケージ
+node_modules
+
+# 環境変数ファイル
+.env
+.env.local
+.env.*.local
+
+# ログ
+*.log
+npm-debug.log*
+
+# OS が生成するファイル
+.DS_Store
+
+# Claude Code のスキル
+.claude/skills/skill-creator/

@@ -1,0 +1,24 @@
+{
+  "name": "workspace",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/atsushi11o7/qiita-content.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/atsushi11o7/qiita-content/issues"
+  },
+  "homepage": "https://github.com/atsushi11o7/qiita-content#readme",
+  "devDependencies": {
+    "@qiita/qiita-cli": "^1.8.0"
+  }
+}

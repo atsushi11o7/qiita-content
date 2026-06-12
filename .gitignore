@@ -15,3 +15,9 @@ npm-debug.log*
 
 # Claude Code のスキル
 .claude/skills/skill-creator/
+
+# Qiita CLI のリモート状態の控え
+public/.remote/
+
+# 執筆用の作業置き場（参考資料・画像の一時置き場・執筆指示書）
+_work/

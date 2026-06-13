@@ -17,7 +17,7 @@ description: 既に公開済みの Qiita 記事を修正するために `update/
 
 - `main` → そのまま続行
 - `update/<name>` → 既に update ブランチにいる。編集が済んでいるなら `/publish-article` を案内して中断
-- `article/<name>` → 新規記事の作業中。`/publish-article`（新規公開）を案内して中断
+- `new/<name>` → 新規記事の作業中。`/publish-article`（新規公開）を案内して中断
 - それ以外 → ユーザーに状況を確認する
 
 ## Step 2: 対象記事の特定

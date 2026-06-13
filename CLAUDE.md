@@ -74,13 +74,13 @@ Qiita の記事を Qiita CLI + GitHub Actions で管理・公開するための�
 
 | フェーズ | スキル / エージェント | 補足 |
 | --- | --- | --- |
-| 新規作成 | `/new-article` | name/title/tags を確定して `article/<name>` ブランチで雛形生成 |
+| 新規作成 | `/new-article` | name/title/tags を確定して `new/<name>` ブランチで雛形生成 |
 | 執筆 | `/draft-section` | 見出し + メモから節の下書きを生成（任意。手書きでも可） |
 | プレビュー | （なし） | `npx qiita preview`（http://localhost:8888）。画像アップロードもここで行う |
 | 機械チェック | `/pre-publish-check` | CLAUDE.md ルールへの**適合**を機械的に判定（frontmatter、tags 数、表記揺れ、画像 URL など） |
 | 編集レビュー | Agent: `content-reviewer` | **内容の質**を編集者視点で評価（論理展開、構成、読者適合、文体の読みやすさなど） |
 | 更新の開始 | `/update-article` | 公開済み記事を修正するため `update/<name>` ブランチを切る（反映は `/publish-article`） |
-| main へ反映（新規公開・更新反映の共通） | `/publish-article` | `article/<name>`（新規）でも `update/<name>`（更新）でも、commit → push → PR → squash merge（Actions が `qiita publish`） |
+| main へ反映（新規公開・更新反映の共通） | `/publish-article` | `new/<name>`（新規）でも `update/<name>`（更新）でも、commit → push → PR → squash merge（Actions が `qiita publish`） |
 
 ユーザーから「新しい記事を書きたい」「公開前にチェックして」「Qiita に公開して」「修正を反映して」のような依頼があれば、コマンドを自分で組み立てるのではなく対応するスキル / エージェントを呼び出す。
 
@@ -90,14 +90,14 @@ main への push をトリガーに GitHub Actions（`.github/workflows/publish.
 
 | シナリオ | ブランチ | フロー |
 | --- | --- | --- |
-| 新規記事 | `article/<name>` | `/new-article` がブランチを切る → 執筆 → `/publish-article` で PR → squash merge → Actions が公開 |
+| 新規記事 | `new/<name>` | `/new-article` がブランチを切る → 執筆 → `/publish-article` で PR → squash merge → Actions が公開 |
 | 公開後の大きい修正（追記、節追加、構成変更、コードサンプルの大幅変更など） | `update/<name>` | `/update-article` で `update/<name>` 作成 → 修正 → `/publish-article` で PR → squash merge → Actions が再公開 |
 | 微小な修正（typo、1〜2 行の文言調整など） | `main` 直 | commit → push（Actions が再公開） |
-| リポジトリ運用（Dev Container、CLAUDE.md、スキル定義など記事以外） | `main` 直 または任意のブランチ | 規模に応じて判断 |
+| リポジトリ運用（Dev Container、CLAUDE.md、スキル定義など記事以外） | `chore/<slug>` | `chore/<slug>` でブランチ → PR → squash merge（微小な修正のみ `main` 直を許容） |
 
 ルール：
 
-- 記事関連のブランチ名は `article/<name>` / `update/<name>` で統一する（`<name>` は記事ファイル名と一致）
+- ブランチ名は `<type>/<slug>` で統一する：記事は `new/<name>` / `update/<name>`（`<name>` は記事ファイル名と一致）、リポジトリ運用は `chore/<slug>`。微小な修正のみ `main` 直を許容
 - merge は squash merge を基本とする（履歴を「作業 1 つ = コミット 1 つ」に保つ）
 - merge 後はブランチを削除する（GitHub 側・ローカル両方）
 - **コミットメッセージはタイトル 1 行のみ・英語の命令形・〜72 文字・本文なし・フッターなし**（例：`Publish qiita-cli-setup`）

@@ -1,13 +1,13 @@
 ---
 name: publish-article
-description: 現在の作業ブランチ（`article/<name>` 新規 or `update/<name>` 更新）の内容を main へ反映し、GitHub Actions の `qiita publish --all` を発火させる。commit → push → PR 作成 → squash merge → main 復帰までを担う。「公開して」「publish」「Qiita に出す」「初公開」「修正を反映して」「update を反映」と言われたら使う。ブランチを切る作業は担わない（新規は `/new-article`、更新は `/update-article`）。
+description: 現在の作業ブランチ（`new/<name>` 新規 or `update/<name>` 更新）の内容を main へ反映し、GitHub Actions の `qiita publish --all` を発火させる。commit → push → PR 作成 → squash merge → main 復帰までを担う。「公開して」「publish」「Qiita に出す」「初公開」「修正を反映して」「update を反映」と言われたら使う。ブランチを切る作業は担わない（新規は `/new-article`、更新は `/update-article`）。
 ---
 
 # Qiita 記事の main 反映（新規公開・更新反映の共通）
 
 ## 役割
 
-作業ブランチの内容を PR 経由で main にマージし、main への push で Actions（`.github/workflows/publish.yml`）に `qiita publish --all` を実行させて Qiita に反映する。**新規公開（`article/<name>`）と更新反映（`update/<name>`）の両方**をこのスキルで扱う（反映処理が共通のため）。
+作業ブランチの内容を PR 経由で main にマージし、main への push で Actions（`.github/workflows/publish.yml`）に `qiita publish --all` を実行させて Qiita に反映する。**新規公開（`new/<name>`）と更新反映（`update/<name>`）の両方**をこのスキルで扱う（反映処理が共通のため）。
 
 - ブランチ作成は担わない：新規は `/new-article`、更新は `/update-article` が事前に作る
 - 本文の校正は `/pre-publish-check`、内容レビューは `content-reviewer` で済ませておく
@@ -18,7 +18,7 @@ CLAUDE.md の「Git フロー」に従う。**`main` 上での直接公開は行
 
 `git rev-parse --abbrev-ref HEAD` で現在のブランチを取得し、モードを決める。
 
-- `article/<name>` → **新規公開モード**
+- `new/<name>` → **新規公開モード**
 - `update/<name>` → **更新反映モード**
 - `main` → 中断。「作業ブランチに切り替えてからやり直してください（新規は `/new-article`、更新は `/update-article`）」と案内
 - それ以外のブランチ名 → ユーザーに状況を確認
@@ -44,7 +44,7 @@ CLAUDE.md の「Git フロー」に従う。**`main` 上での直接公開は行
 > - タイトル：<title>
 > - ファイル名：<name>（public/<name>.md）
 > - 公開範囲：<private が false なら「公開」/ true なら「限定共有」>
-> - ブランチ：article/<name>（squash merge 後に削除されます）
+> - ブランチ：new/<name>（squash merge 後に削除されます）
 >
 > ※ 記事 URL（id）は publish 時に採番され、Actions が main に書き戻します。
 

@@ -1,6 +1,6 @@
 ---
 name: new-article
-description: Qiita の新規記事の雛形を作成する。記事の概要をヒアリングして name（ファイル名）/title/tags を確定し、article/<name> ブランチを切ってから npx qiita new で生成し、frontmatter を揃える。「新しい記事を書きたい」「記事を作って」「Qiita の記事を始める」「記事の雛形を用意して」のように Qiita の新規執筆を始めたい意図が見えたら必ず使う。
+description: Qiita の新規記事の雛形を作成する。記事の概要をヒアリングして name（ファイル名）/title/tags を確定し、new/<name> ブランチを切ってから npx qiita new で生成し、frontmatter を揃える。「新しい記事を書きたい」「記事を作って」「Qiita の記事を始める」「記事の雛形を用意して」のように Qiita の新規執筆を始めたい意図が見えたら必ず使う。
 ---
 
 # Qiita 新規記事作成
@@ -29,7 +29,7 @@ description: Qiita の新規記事の雛形を作成する。記事の概要を�
 
 - 内容を表す英小文字・数字・ハイフンの組み合わせを推奨（例：`nextjs-app-router-error-handling`）
 - **Qiita の URL には影響しない**（URL は publish 後に採番される `id`）。そのため後からリネームしても URL は変わらない
-- ただし `article/<name>` ブランチ名にも使うので、分かりやすく一意な名前にする
+- ただし `new/<name>` ブランチ名にも使うので、分かりやすく一意な名前にする
 
 ### title の決め方の指針
 
@@ -45,15 +45,15 @@ description: Qiita の新規記事の雛形を作成する。記事の概要を�
 
 ## Step 4: ブランチを切る
 
-name が確定したら main を最新化して `article/<name>` ブランチを切る。
+name が確定したら main を最新化して `new/<name>` ブランチを切る。
 
 ```bash
 git switch main
 git pull --ff-only
-git switch -c article/<name>
+git switch -c new/<name>
 ```
 
-同名のローカルブランチが残っていると最後の `git switch -c` がエラーになる。その場合は中断してユーザーに状況を報告し、name の再考か旧ブランチの整理（`git branch -D article/<name>`）を相談する。
+同名のローカルブランチが残っていると最後の `git switch -c` がエラーになる。その場合は中断してユーザーに状況を報告し、name の再考か旧ブランチの整理（`git branch -D new/<name>`）を相談する。
 
 ## Step 5: 記事ファイルを生成
 
@@ -83,7 +83,7 @@ npx qiita new <name>
 ## Step 7: 完了報告
 
 - 生成された記事ファイルパス（`public/<name>.md`）を伝える
-- 現在 `article/<name>` ブランチにいることを明示する
+- 現在 `new/<name>` ブランチにいることを明示する
 - 画像を入れる場合は `npx qiita preview`（http://localhost:8888）の画面にドラッグ & ドロップしてアップロードする旨を案内する（ローカルパスは使わない）
 - 公開時は `/publish-article` を使うよう案内する（commit → PR → squash merge → Actions が `qiita publish` まで進む）
 

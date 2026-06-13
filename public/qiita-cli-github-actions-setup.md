@@ -144,11 +144,15 @@ CMD ["bash"]
 }
 ```
 
+この設定例には「Qiita CLI に必須なもの」と「筆者の好みで足しているもの」が混在しています。
+必須なのは Node.js 入りのベースイメージ・`git`・ポート 8888 の公開の 3 点だけです。
+それ以外（自作 Feature の `base-utils`、Claude Code とその拡張機能、Claude 設定用の named volume）は筆者の環境都合なので、不要なら削って構いません。
+とくに Claude Code は本記事の手順には不要で、Qiita の執筆環境だけを作るなら入れなくても動きます。
+
 ベースイメージは `node:24-trixie-slim` です。
 Qiita CLI は Node.js で動くため、Node.js 入りのイメージを使います。
 
 `features` の `ghcr.io/atsushi11o7/devcontainer-features/base-utils:2` は、`git` や `tzdata`、`locales` といった基本的なユーティリティをまとめてセットアップしてくれる Feature です（ここでは locale を `C.UTF-8`、timezone を `Asia/Tokyo` に指定しています）。
-同じ構成にする必要はないので、必要なツールはご自身で別途入れてください。
 `git` はこの記事の手順で使うので、Feature を使わない場合は Dockerfile 側で `apt-get install -y git` を追加してください。
 
 GitHub CLI（`gh`）を入れているのは、Secret 登録や GitHub の操作をコンテナ内から行うためです。
@@ -158,41 +162,157 @@ GitHub CLI（`gh`）を入れているのは、Secret 登録や GitHub の操作
 
 `EXPOSE 8888` と `forwardPorts: [8888]` は、Qiita CLI のプレビューサーバ（ http://localhost:8888 ）をホストのブラウザから開くためのものです。
 
-なお、この環境には Claude Code も含めています（Dockerfile でのインストールと、`anthropic.claude-code` 拡張機能）。
-Claude Code を使った執筆サポートは別記事で扱うため、本記事では環境に同梱している点に触れるだけにとどめます。
-
 ## Qiita CLI を導入する
 
-<!-- メモ:
-- npm install @qiita/qiita-cli
-- npx qiita init（生成物: qiita.config.json / .github/workflows/publish.yml / .gitignore）
-- アクセストークン発行（read_qiita + write_qiita の両方）【画像アップロード: _work/837884E2...（トークン発行画面）】
-- npx qiita login【画像アップロード: _work/15F1101D...（login のターミナル出力）】
-- npx qiita pull（既存記事をローカルに取得）
--->
+リポジトリのルートで Qiita CLI を導入します。
+
+まず `package.json` を用意し、Qiita CLI をインストールします。
+
+```bash
+npm init -y
+npm install @qiita/qiita-cli --save-dev
+```
+
+次に初期化します。
+
+```bash
+npx qiita init
+```
+
+これで次のファイルが生成されます。
+
+- `qiita.config.json`（Qiita CLI の設定）
+- `.github/workflows/publish.yml`（main への push で自動公開する GitHub Actions ワークフロー）
+- `.gitignore`
+
+続いて、Qiita のアクセストークンを発行します。
+[Qiita のトークン発行ページ](https://qiita.com/settings/tokens/new) を開き、`read_qiita`（記事の取得）と `write_qiita`（記事の投稿・更新）の両方にチェックを入れて発行します。
+このトークンは、ローカルでの `npx qiita login` と、後述の GitHub Actions の Secret 登録の両方で使います。
+
+![qiita_access_tokens.jpg](https://qiita-image-store.s3.ap-northeast-1.amazonaws.com/0/3121510/52d4784e-8094-43e7-a1b2-8654406a9099.jpeg)
+
+発行したトークンでログインします。
+
+```bash
+npx qiita login
+```
+
+プロンプトにトークンを貼り付けるとログインが完了し、トークンは `~/.config/qiita-cli/credentials.json` に保存されます。
+
+![qiita_login.jpg](https://qiita-image-store.s3.ap-northeast-1.amazonaws.com/0/3121510/72a05461-ad8e-484a-acb5-bfb8b731d641.jpeg)
+
+すでに Qiita に投稿済みの記事があれば、ローカルに取得しておきます。
+
+```bash
+npx qiita pull
+```
+
+取得した記事は `public/` 配下に Markdown ファイルとして保存されます。
 
 ## GitHub Actions で自動公開する
 
-<!-- メモ:
-- publish.yml の中身（main/master への push がトリガー、qiita publish --all、permissions: contents: write、publish 後に id を main へ書き戻す）
-- QIITA_TOKEN をリポジトリ Secret に登録（gh secret set QIITA_TOKEN）【画像アップロード: _work/3E8AAF48...（gh secret set 成功）】
--->
+`qiita init` が `.github/workflows/publish.yml` を生成しています。
+中身は次のとおりです。
+
+```yaml
+# Please set 'QIITA_TOKEN' secret to your repository
+name: Publish articles
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish_articles:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: increments/qiita-cli/actions/publish@v1
+        with:
+          qiita-token: ${{ secrets.QIITA_TOKEN }}
+          root: "."
+```
+
+`on.push.branches` のとおり、main（または master）への push で起動します。
+`increments/qiita-cli/actions/publish@v1` が `qiita publish --all` を実行し、変更のある記事だけを Qiita に反映します。
+`permissions: contents: write` は、publish 後に Qiita が採番した記事 ID をリポジトリへ書き戻すために必要です（詳しくは後述の「公開フロー」で触れます）。
+
+このワークフローは `secrets.QIITA_TOKEN` でトークンを参照するので、リポジトリに同名の Secret を登録します。
+登録するトークンは、先ほど発行した `read_qiita` + `write_qiita` のトークンと同じもので構いません。
+
+```bash
+gh secret set QIITA_TOKEN
+```
+
+プロンプトにトークンを貼り付けると登録されます（GitHub の Settings → Secrets and variables → Actions からでも登録できます）。
+
+![qiita_token.jpg](https://qiita-image-store.s3.ap-northeast-1.amazonaws.com/0/3121510/4f1612e1-b8b9-4c2a-89f6-92a58a41d5fb.jpeg)
+
+これで、main へ push するたびにワークフローが走り、Qiita に自動公開される状態になりました。
 
 ## 記事を書いてプレビューする
 
-<!-- メモ:
-- npx qiita new <name> で雛形作成、npx qiita preview（http://localhost:8888）でプレビュー
-- 画像はプレビュー画面にドラッグ & ドロップして Qiita にアップロード（ローカルパスは使えない）
-- 【Dev Container でのハマりどころ】qiita preview は qiita.config.json の host 既定が "localhost" で、Node 17+ では localhost が IPv6（::1）に解決されるため IPv6 のみにバインドする。VS Code は IPv4（127.0.0.1）でポート転送するので、ブラウザに何も表示されない。qiita.config.json の host を "127.0.0.1" にすると IPv4 でバインドして解決（コンテナのリビルド不要、次の preview から有効）
--->
+新しい記事は `npx qiita new` で作成します。
+
+```bash
+npx qiita new <ファイル名>
+```
+
+`public/<ファイル名>.md` が生成されるので、frontmatter（`title` や `tags`）を整えて本文を書きます。
+`tags` は 1〜5 個必須で、0 個だと publish に失敗するので注意してください。
+
+書いた記事は、プレビューサーバで見た目を確認できます。
+
+```bash
+npx qiita preview
+```
+
+ブラウザで http://localhost:8888 を開くと、ローカルの記事一覧とプレビューが表示されます。
+
+![qiita_preview.jpg](https://qiita-image-store.s3.ap-northeast-1.amazonaws.com/0/3121510/058ec978-5f23-4a96-a813-db44f0756ddd.jpeg)
+
+プレビュー画面の「画像をアップロードする」を開くと、Qiita の画像アップロードページに移動します。
+そこへ画像をドラッグ & ドロップしてアップロードし、表示された URL をコピーします。
+コピーした URL を `![alt](URL)` の形で Markdown に貼り付けます。
+ローカルの相対パスや絶対パスは Qiita 上では表示されないため、画像はこの方法で取り込みます。
+
+:::note warn
+**Dev Container でプレビューが表示されないとき**
+`qiita preview` は `qiita.config.json` の `host` 既定が `"localhost"` で、Node.js 17 以降は `localhost` が IPv6（`::1`）に解決されるため、IPv6 だけにバインドします。
+VS Code は IPv4（`127.0.0.1`）でポートを転送するので、これだとブラウザに何も表示されません。
+`qiita.config.json` の `host` を `"127.0.0.1"` に変えると IPv4 でバインドされ、表示されるようになります。
+:::
 
 ## 公開フロー
 
-<!-- メモ: ブランチ → PR → squash merge → main への push → Actions が qiita publish。新規記事は publish 時に id が採番され、Actions が main に書き戻す → ローカルは git pull で取り込む -->
+記事を公開するときは、`public/` 配下の Markdown を main へ push します。
+main への push をトリガーに GitHub Actions が走り、`qiita publish --all` で Qiita に反映されます。
+手元で `npx qiita publish` を実行する必要はありません。
+
+新規記事の場合、公開時に Qiita 側で記事の ID が採番されます。
+この ID は Actions が frontmatter に書き戻し、`Updated by qiita-cli` というコミットで main に push し返します。
+そのため、公開後はローカルの main を `git pull` して、採番された ID を取り込んでおきます。
+
+main への push は即公開につながるため、書きかけの記事を main に置いておくことはできません。
+公開したくない記事は、記事ごとにブランチを切って執筆し、完成したら PR 経由で main にマージすると、main を常に「公開済みの状態」に保てます。
 
 ## おわりに
 
-<!-- メモ:
-- この記事自体、この環境で書いた
-- Claude Code による執筆サポート（CLAUDE.md + スキル + エージェント）は別記事で紹介予定（予告リンク）
--->
+「Qiita は Web エディタで書くもの」と思い込んでいましたが、Qiita CLI と GitHub Actions を使えば、リポジトリで記事を管理し、push で公開する環境を作れました。
+途中、Dev Container 特有の IPv4 / IPv6 の問題や、画像はアップロードページ経由で URL を貼る必要があるなど、Qiita ならではのつまずきもありましたが、一度整えてしまえば快適に書けます。
+
+なお、この環境には Claude Code も組み込んでいます。
+記事の執筆を Claude Code に任せる仕組み（CLAUDE.md・スキル・エージェント）は、別記事で紹介する予定です。

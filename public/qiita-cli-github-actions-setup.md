@@ -15,28 +15,52 @@ ignorePublish: false
 ---
 ## はじめに
 
-<!-- メモ:
-- 以前 Dev Container で Zenn の執筆環境を整えた（前記事リンク: https://zenn.dev/atsushi11o7/articles/zenn-publish-via-github-with-devcontainer）
-- Qiita は Zenn のような GitHub 連携機能が無いと思っていた
-- 実は Qiita CLI でリポジトリ連携・ローカル執筆ができると知った → 執筆環境のリポジトリを整えてみた
-- この記事で扱う範囲（執筆環境の構築。Claude Code による執筆サポートは別記事）
--->
+以前、Dev Container で Zenn の執筆環境を整え、GitHub 連携で記事を公開する仕組みを作りました。
+
+https://zenn.dev/atsushi11o7/articles/zenn-publish-via-github-with-devcontainer
+
+Zenn は GitHub リポジトリと連携でき、リポジトリへ push するだけで記事を公開できます。一方で Qiita には Zenn のような GitHub 連携機能は無いと思い込んでいて、記事は Web エディタで書くものだと考えていました。
+
+ところが、Qiita にも公式の Qiita CLI があり、記事を Markdown ファイルとしてローカルで執筆し、GitHub リポジトリで管理できることを知りました。さらに GitHub Actions と組み合わせれば、main への push をトリガーに自動公開もできます。
+
+そこで、Zenn のときと同じように「リポジトリで記事を管理し、push で公開する」執筆環境を、Qiita CLI と GitHub Actions で整えてみました。この記事では、その構築手順をまとめます。
 
 ## この記事で作るもの
 
-<!-- メモ: 完成形の概要を先に提示。public/ に記事 Markdown を置き、Dev Container で執筆環境を再現、Qiita CLI でローカル執筆・プレビュー、main への push で GitHub Actions が自動公開、という全体像を箇条書きor図で -->
+完成するのは、次のような Qiita 記事の執筆環境です。
+
+- 記事を Markdown ファイルとして GitHub リポジトリ（`public/` 配下）で管理する
+- Dev Container で執筆環境をコンテナ化し、どのマシンでも同じ状態をすぐ再現できる
+- Qiita CLI で記事の新規作成・ローカルプレビュー・既存記事の取得を行う
+- main への push をトリガーに、GitHub Actions が自動で Qiita へ公開する
+
+公開までの流れは次のとおりです。
+
+1. Dev Container 内で記事を書く（`npx qiita preview` で見た目を確認）
+2. main へ push する
+3. GitHub Actions が `qiita publish` を実行する
+4. Qiita に記事が公開される
+
+以降では、この環境をゼロから構築する手順を順に見ていきます。
 
 ## 前提
 
-<!-- メモ: 必要なもの（GitHub アカウント / Qiita アカウント / Docker / VS Code）。Node.js はコンテナ内で用意するので不要 -->
+- GitHub アカウント（記事リポジトリの管理と GitHub Actions に使用）
+- Qiita アカウント（記事の公開先。アクセストークンを発行する）
+- Docker（Dev Container の実行に使用）
+- VS Code（Dev Containers 拡張機能で開発コンテナを開く）
+
+Node.js などの実行環境は Dev Container 内に用意するため、ホスト側へインストールする必要はありません。
 
 ## GitHub リポジトリを用意する
 
-<!-- メモ: 記事管理用のリポジトリを作成。Zenn は「アプリ連携」で GitHub と繋ぐが、Qiita にはその機能が無く、Qiita CLI + GitHub Actions で同等のことを実現する、という違いを説明 -->
+記事を管理する GitHub リポジトリを作成します。中身は空で構いません（このあと Dev Container や Qiita CLI の設定を加えていきます）。リポジトリ名は任意です（筆者は `qiita-content` としました）。
+
+以降の手順は、このリポジトリをクローンし、そのルートで作業する前提で進めます。
 
 ## Dev Container を構築する
 
-<!-- メモ: Dockerfile（Node.js ベース + gh CLI など）と devcontainer.json。実ファイル .devcontainer/ を参照して書く。※ AI 執筆補助（Claude Code）は別記事なのでここでは触れない -->
+<!-- メモ: Dockerfile（Node.js ベース + gh CLI など）と devcontainer.json。実ファイル .devcontainer/ を参照して書く。Claude Code による執筆サポートもこの環境に含まれるが、詳細は別記事に回す旨をここで一言触れる -->
 
 ## Qiita CLI を導入する
 

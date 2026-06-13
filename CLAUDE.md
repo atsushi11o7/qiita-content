@@ -104,6 +104,12 @@ main への push をトリガーに GitHub Actions（`.github/workflows/publish.
 - 新規記事を main にマージして Actions が publish すると、Qiita が採番した `id` を Actions が main に commit（`Updated by qiita-cli`）で書き戻す。**マージ後にローカル main を `git pull` して取り込む**
 - 「大きい / 微小」の境界が曖昧なときはブランチ側に倒す（事故が起きにくい）
 
+### 複数記事の並行執筆
+
+- 記事 1 本につき 1 ブランチ（新規は `new/<name>`、更新は `update/<name>`）。`git switch` で行き来して 1 本ずつ編集する
+- 別の記事を始めるときは、作業中ブランチで変更を commit し、`git switch main` で main に戻ってから `/new-article` または `/update-article` を呼ぶ（両スキルは main からの呼び出しを前提とするため）
+- 公開は独立。`/publish-article` で 1 本ずつ main にマージできる
+
 ## 環境
 
 Dev Container 内で作業するのが前提。VS Code で `Reopen in Container` で起動する。

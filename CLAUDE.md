@@ -75,7 +75,8 @@ Qiita の記事を Qiita CLI + GitHub Actions で管理・公開するための�
 | フェーズ | スキル / エージェント | 補足 |
 | --- | --- | --- |
 | 新規作成 | `/new-article` | name/title/tags を確定して `new/<name>` ブランチで雛形生成 |
-| 執筆 | `/draft-section` | 見出し + メモから節の下書きを生成（任意。手書きでも可） |
+| 構成（アウトライン） | `/outline-article` | 見出し構造と各節の方針メモ（骨組み）を立てる |
+| 執筆 | `/draft-section` | 骨組みの見出し + メモから節の下書きを生成（任意。手書きでも可） |
 | プレビュー | （なし） | `npx qiita preview`（http://localhost:8888）。画像アップロードもここで行う |
 | 機械チェック | `/pre-publish-check` | CLAUDE.md ルールへの**適合**を機械的に判定（frontmatter、tags 数、表記揺れ、画像 URL など） |
 | 編集レビュー | Agent: `content-reviewer` | **内容の質**を編集者視点で評価（論理展開、構成、読者適合、文体の読みやすさなど） |

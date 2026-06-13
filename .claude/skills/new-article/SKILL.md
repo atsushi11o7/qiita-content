@@ -85,10 +85,11 @@ npx qiita new <name>
 - 生成された記事ファイルパス（`public/<name>.md`）を伝える
 - 現在 `new/<name>` ブランチにいることを明示する
 - 画像を入れる場合は `npx qiita preview`（http://localhost:8888）の画面にドラッグ & ドロップしてアップロードする旨を案内する（ローカルパスは使わない）
+- 次は `/outline-article` で構成（骨組み）を立て、`/draft-section` で各節を書くよう案内する
 - 公開時は `/publish-article` を使うよう案内する（commit → PR → squash merge → Actions が `qiita publish` まで進む）
 
 ## 重要な制約
 
 - name はユーザー承認を取ってから確定する（ブランチ名にも波及するため）
-- 骨組み（見出し構造）の自動生成は本スキルの責務外（節単位の執筆は `/draft-section` で）
+- 骨組み（アウトライン）作成は `/outline-article`、節単位の執筆は `/draft-section` の責務（本スキルは雛形と frontmatter の初期化まで）
 - `public/` 直下にしか記事を置かない（サブディレクトリは Qiita CLI が認識しない）

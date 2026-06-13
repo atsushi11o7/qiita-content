@@ -84,7 +84,7 @@ npx qiita new <name>
 
 - 生成された記事ファイルパス（`public/<name>.md`）を伝える
 - 現在 `new/<name>` ブランチにいることを明示する
-- 画像を入れる場合は `npx qiita preview`（http://localhost:8888）の画面にドラッグ & ドロップしてアップロードする旨を案内する（ローカルパスは使わない）
+- 画像を入れる場合は Qiita の画像アップロードページ（https://qiita.com/settings/uploaded_images）でアップロードして URL を貼る旨を案内する（ローカルパスは使わない）
 - 次は `/outline-article` で構成（骨組み）を立て、`/draft-section` で各節を書くよう案内する
 - 公開時は `/publish-article` を使うよう案内する（commit → PR → squash merge → Actions が `qiita publish` まで進む）
 

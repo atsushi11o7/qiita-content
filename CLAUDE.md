@@ -16,7 +16,7 @@ Qiita の記事を Qiita CLI + GitHub Actions で管理・公開するための�
 
 - 認証：ローカルは `npx qiita login`（トークンは `~/.config/qiita-cli/credentials.json` に保存）。CI は Secret `QIITA_TOKEN` を使う
 - 新規作成：`npx qiita new <name>` → `public/<name>.md` を生成
-- プレビュー：`npx qiita preview`（http://localhost:8888）。画像のアップロードもこの画面で行う
+- プレビュー：`npx qiita preview`（http://localhost:8888）で表示確認する
 - 取得：`npx qiita pull`（Qiita 上の記事を `public/` に同期）
 - 公開・更新：`npx qiita publish <name>` / `--all`。ただし本リポジトリでは**原則 main への push 経由で Actions に任せる**（下記「Git フロー」参照）
 
@@ -41,7 +41,7 @@ Qiita の記事を Qiita CLI + GitHub Actions で管理・公開するための�
 - 本文の見出しは `##` から始める（`#` は frontmatter の `title` が担うので使わない）
 - コードブロックには必ず言語を指定する（` ```bash`、` ```json`、` ```dockerfile` など）
 - 画像は **Qiita にアップロードしたホスト URL** で参照する
-  - `npx qiita preview` の画面に画像をドラッグ & ドロップ（または Ctrl+V で貼り付け）するとアップロードされ、`![alt](https://qiita-image-store...)` 形式の Markdown が挿入される
+  - 画像は Qiita の画像アップロードページ（https://qiita.com/settings/uploaded_images）でアップロードし、得られた URL を `![alt](URL)` で貼る（プレビュー画面の「画像をアップロードする」からこのページへ移動できる。プレビュー自体に画像アップロード機能はない）
   - **ローカルの相対パス・絶対パス（`./images/...` や `/images/...`）は Qiita では表示されない**ので使わない
   - 一時的な画像素材は `_work/` に置く（リポジトリにも Qiita にも載らない）
 - Qiita 独自記法（`:::note info` などの Note ブロック）を使ってもよい
@@ -77,7 +77,7 @@ Qiita の記事を Qiita CLI + GitHub Actions で管理・公開するための�
 | 新規作成 | `/new-article` | name/title/tags を確定して `new/<name>` ブランチで雛形生成 |
 | 構成（アウトライン） | `/outline-article` | 見出し構造と各節の方針メモ（骨組み）を立てる |
 | 執筆 | `/draft-section` | 骨組みの見出し + メモから節の下書きを生成（任意。手書きでも可） |
-| プレビュー | （なし） | `npx qiita preview`（http://localhost:8888）。画像アップロードもここで行う |
+| プレビュー | （なし） | `npx qiita preview`（http://localhost:8888）で表示確認 |
 | 機械チェック | `/pre-publish-check` | CLAUDE.md ルールへの**適合**を機械的に判定（frontmatter、tags 数、表記揺れ、画像 URL など） |
 | 編集レビュー | Agent: `content-reviewer` | **内容の質**を編集者視点で評価（論理展開、構成、読者適合、文体の読みやすさなど） |
 | 更新の開始 | `/update-article` | 公開済み記事を修正するため `update/<name>` ブランチを切る（反映は `/publish-article`） |
@@ -101,7 +101,7 @@ main への push をトリガーに GitHub Actions（`.github/workflows/publish.
 - ブランチ名は `<type>/<slug>` で統一する：記事は `new/<name>` / `update/<name>`（`<name>` は記事ファイル名と一致）、リポジトリ運用は `chore/<slug>`。微小な修正のみ `main` 直を許容
 - merge は squash merge を基本とする（履歴を「作業 1 つ = コミット 1 つ」に保つ）
 - merge 後はブランチを削除する（GitHub 側・ローカル両方）
-- **コミットメッセージはタイトル 1 行のみ・英語の命令形・〜72 文字・本文なし・フッターなし**（例：`Publish qiita-cli-setup`）
+- **コミットメッセージはタイトル 1 行のみ・英語の命令形・〜72 文字・本文なし・フッターなし**（例：`Add outline-article skill`）。記事の公開・更新だけは例外で、squash merge で main に残る **PR タイトル**を `Publish: <記事タイトル>` / `Update: <記事タイトル>` とする（ブランチ上の作業コミットは squash で消えるので任意のメッセージでよい）
 - 新規記事を main にマージして Actions が publish すると、Qiita が採番した `id` を Actions が main に commit（`Updated by qiita-cli`）で書き戻す。**マージ後にローカル main を `git pull` して取り込む**
 - 「大きい / 微小」の境界が曖昧なときはブランチ側に倒す（事故が起きにくい）
 

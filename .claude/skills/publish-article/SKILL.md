@@ -79,22 +79,20 @@ git commit -m "<commit message>"
 git push -u origin HEAD
 ```
 
-- コミットメッセージは CLAUDE.md「Git フロー」のコミット規約に従う
-  - ［新規］`Publish <name>`（例：`Publish qiita-cli-setup`）
-  - ［更新］`Update <name>`（例：`Update qiita-cli-setup`）
+- ブランチ上の作業コミットのメッセージは squash merge で消えるので、任意の作業メッセージでよい（公開・更新の本タイトルは Step 7 の PR タイトルで付ける）
 - 既に upstream が設定されているなら `-u origin HEAD` は省略可
 - 既に複数の commit が積まれていてもそのまま push する（squash merge で 1 つにまとまる）
 
 ## Step 7: PR を作成して squash merge
 
-`--body` には要点を 1〜2 行で書く（［新規］記事の概要 /［更新］変更点）。
+PR タイトルが squash merge で main に残るコミット件名になる。`--body` には要点を 1〜2 行で書く（［新規］記事の概要 /［更新］変更点）。
 
 ```bash
-gh pr create --title "<commit message と同じ>" --body "<要点>"
+gh pr create --title "<PR タイトル>" --body "<要点>"
 gh pr merge --squash --delete-branch
 ```
 
-- PR タイトルはコミットメッセージと揃える
+- PR タイトルは ［新規］`Publish: <記事タイトル>` /［更新］`Update: <記事タイトル>`（記事タイトルは frontmatter の `title`）
 - `--delete-branch` で GitHub 上のブランチが自動削除される
 - merge が CI 失敗や保護ルールで止まる場合は中断してユーザーに状況を報告する
 

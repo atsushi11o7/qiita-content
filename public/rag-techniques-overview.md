@@ -707,6 +707,8 @@ flowchart LR
 
 ```python
 # src/rag/graph/corrective_rag.py（抜粋）
+from langgraph.graph import END, START, StateGraph
+
 class RAGState(TypedDict):
     original_query: str   # ユーザーの元の質問（生成に使う。書き換えない）
     search_query: str     # 実際の検索クエリ（rewrite_query で更新）
@@ -735,7 +737,27 @@ def build_corrective_rag(retriever, generator, max_retries=2):
     def rewrite_query(state):
         new_q = rewrite_chain.invoke({"query": state["search_query"]}).strip()
         return {"search_query": new_q, "retries": state.get("retries", 0) + 1}
-    ...
+
+    # 関連ありなら generate、なければ rewrite_query へ（max_retries を超えたら打ち切って generate）
+    def should_continue(state):
+        if state["grade"] == "relevant" or state.get("retries", 0) >= max_retries:
+            return "generate"
+        return "rewrite_query"
+
+    # ノードとエッジを組み立てる
+    graph = StateGraph(RAGState)
+    graph.add_node("retrieve", retrieve)
+    graph.add_node("grade_documents", grade_documents)
+    graph.add_node("generate", generate)
+    graph.add_node("rewrite_query", rewrite_query)
+
+    graph.add_edge(START, "retrieve")
+    graph.add_edge("retrieve", "grade_documents")
+    graph.add_conditional_edges("grade_documents", should_continue)  # ここがループの分岐
+    graph.add_edge("rewrite_query", "retrieve")                      # not_relevant → 再検索
+    graph.add_edge("generate", END)
+
+    return graph.compile()
 ```
 
 実装上のポイントが 3 つあります。

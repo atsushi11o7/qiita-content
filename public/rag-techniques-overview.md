@@ -136,12 +136,16 @@ llm = ChatOllama(model="qwen2.5:7b", base_url=host) if host else ChatOllama(mode
 | `fugashi` + `unidic-lite` | 日本語の形態素解析（BM25 のトークナイザー） |
 | `rank-bm25` | BM25 スコアリング |
 
-### 検索器の共通インターフェース（BaseRetriever）
+### 実装の共通パターン（BaseRetriever / Document）
 
 この記事に出てくる検索器（Dense / BM25 / ハイブリッド / Reranker / HyDE など）は、すべて LangChain の `BaseRetriever` を継承して作っています。
 実装するのは `_get_relevant_documents(self, query, *, run_manager)` メソッドで、呼び出し側は公開 API の `.invoke(query)` を使います（内部で `_get_relevant_documents` が呼ばれます）。
-
 このおかげで、どの検索手法も同じ `invoke()` で扱え、Reranker や HyDE のように「別の検索器をラップする」形でも自由に組み合わせられます。
+
+検索でやり取りする単位は LangChain の `Document` で、本文（`page_content`）とメタデータ（`metadata`）を持ちます。
+`metadata` に `doc_id` やタグを入れておくことで、後段のフィルタや評価で使えます。
+
+また `BaseRetriever` は Pydantic モデルなので、形態素解析器や埋め込み / Reranker モデルのような重いオブジェクトは `PrivateAttr` として持ち、`model_validator(mode="after")` でインスタンス化後に一度だけ構築します（BM25・Reranker・HyDE などで繰り返し出てきます）。
 
 ## コーパスの準備（Qiita 公開 API）
 
@@ -362,7 +366,7 @@ class JapaneseBM25Retriever(BaseRetriever):
         return [d for d, _ in ranked[: self.k]]
 ```
 
-`Tagger` や `BM25Okapi` は重いので、Pydantic の `PrivateAttr`（シリアライズ対象外）として持ち、`model_validator(mode="after")` でインスタンス化後に一度だけ構築しています。
+`Tagger` や `BM25Okapi` は、前述の `PrivateAttr` + `model_validator(mode="after")` パターンで初期化しています。
 
 ## ハイブリッド検索（RRF）
 
@@ -486,12 +490,62 @@ retriever = RerankedRetriever(base_retriever=filtered, reranker=CrossEncoderRera
 
 ## クエリ変換（HyDE・マルチクエリ・分解）
 
-<!-- メモ:
-- 素のクエリが検索に最適とは限らない → クエリ側を変換して再現率を上げる
-- HyDE：LLM に仮回答を生成させ、その文で検索（仮回答と実文書が近いベクトルになる）。include_original=True で元クエリ結果と RRF 統合（固有名詞が薄まる対策）
-- マルチクエリ：ParaphraseRetriever（言い換え N 個）/ DecomposeRetriever（サブクエリ分解）→ RRF 統合
-- コード：hyde.py _get_relevant_documents / multi_query.py
--->
+ユーザーが入力したクエリが、そのまま検索に最適とは限りません。
+クエリ側を変換・拡張してから検索する手法をいくつか試しました。
+
+### HyDE（Hypothetical Document Embeddings）
+
+HyDE は、クエリに対する「仮の回答」を LLM に生成させ、その仮回答文で検索する手法です。
+
+```text
+通常: クエリ ──embed──→ 検索 → 文書
+HyDE: クエリ → LLM → 仮回答文 ──embed──→ 検索 → 文書
+```
+
+仮回答文は実際の文書と「同じような文章」になりやすいため、クエリそのものより文書に近いベクトルになる、という発想です。
+
+```python
+# src/rag/retrievers/hyde.py（抜粋）
+_PROMPT = ChatPromptTemplate.from_messages([
+    ("system", "必ず日本語のみで答えてください。"),
+    ("user", "次の質問に答える日本語の文章を簡潔に書いてください。\n質問: {query}"),
+])
+
+class HydeRetriever(BaseRetriever):
+    base_retriever: BaseRetriever
+    include_original: bool = False  # True で元クエリ検索とも RRF 統合
+    _chain: Runnable = PrivateAttr()  # _PROMPT | ChatOllama | StrOutputParser
+
+    def _get_relevant_documents(self, query, *, run_manager):
+        hypothesis = self._chain.invoke({"query": query})   # 仮回答を生成
+        hyde_results = self.base_retriever.invoke(hypothesis)
+        if not self.include_original:
+            return hyde_results
+        raw_results = self.base_retriever.invoke(query)
+        return _rrf_merge([raw_results, hyde_results])[: self.top_k]
+```
+
+`include_original=True` にすると、仮回答で固有名詞が薄まるのを補うため、元クエリの検索結果とも RRF で統合します。
+
+### マルチクエリ（言い換え・分解）
+
+クエリを LLM で複数に増やし、それぞれで検索して RRF で統合する手法です。
+
+```python
+# src/rag/retrievers/multi_query.py（概略）
+class ParaphraseRetriever(BaseRetriever):
+    """言い換えを N 個生成 → 各クエリで検索 → RRF 統合"""
+    base_retriever: BaseRetriever
+    n_paraphrases: int = 3
+
+class DecomposeRetriever(BaseRetriever):
+    """複雑なクエリをサブクエリに分解 → 各クエリで検索 → RRF 統合"""
+    base_retriever: BaseRetriever
+    n_subqueries: int = 3
+```
+
+言い換え（Paraphrase）は表現のゆれを、分解（Decompose）は複数トピックを含む質問をカバーしやすくします。
+統合はハイブリッド検索と同じく RRF です。
 
 ## 親子チャンク（Parent-Child）
 

@@ -99,7 +99,7 @@ explicit = true
 ### LLM はローカルの Ollama で
 
 生成・HyDE・Corrective RAG では LLM を呼び出します。
-本来は OpenAI などの API を使うところですが、お金をかけたくなかったので、ローカルに Ollama サーバーを立てて API ライクに使うようにしました（モデルは `qwen2.5:7b`を使用しています）。
+本来は OpenAI などの API を使うところですが、API 利用料を抑えたかったので、ローカルに Ollama サーバーを立てて API ライクに使うようにしました（モデルは `qwen2.5:7b` を使用しています）。
 Ollama は devcontainer の外で起動し、Docker Compose でサービス化して、コンテナ内から `OLLAMA_HOST` 経由で呼び出します。
 
 ```python
@@ -115,7 +115,8 @@ llm = ChatOllama(model="qwen2.5:7b", base_url=host) if host else ChatOllama(mode
 当時と比べると、現在の 1.x 系は用途ごとにパッケージが細分化されていて、どれを import すればよいか少しややこしくなっています。
 そこで、最初に整理しておきます（たとえば `ParentDocumentRetriever` は本体ではなく `langchain-classic` に移っています）。
 
-今回（2026 年 6 月時点）使った LangChain 関連パッケージとバージョンは次のとおりです。
+今回使った LangChain 関連パッケージとバージョンは次のとおりです。
+なお LangChain は更新が速いため、以下はこの記事を書いた時点（2026 年 6 月）で `uv.lock` に固定されていたバージョンです。
 
 | パッケージ | バージョン | 役割 |
 |---|---|---|
@@ -138,9 +139,9 @@ llm = ChatOllama(model="qwen2.5:7b", base_url=host) if host else ChatOllama(mode
 
 ### 実装の共通パターン（BaseRetriever / Document）
 
-この記事に出てくる検索器（Dense / BM25 / ハイブリッド / Reranker / HyDE など）は、すべて LangChain の `BaseRetriever` を継承して作っています。
+この記事に出てくる検索器は、最終的にすべて LangChain の `BaseRetriever` として扱える形にしています。Dense 検索は FAISS の `as_retriever()` を使い、BM25 / ハイブリッド / HyDE などは `BaseRetriever` を継承して自作しています。
 実装するのは `_get_relevant_documents(self, query, *, run_manager)` メソッドで、呼び出し側は公開 API の `.invoke(query)` を使います（内部で `_get_relevant_documents` が呼ばれます）。
-このおかげで、どの検索手法も同じ `invoke()` で扱え、Reranker や HyDE のように「別の検索器をラップする」形でも自由に組み合わせられます。
+このおかげで、どの検索手法も同じ `invoke()` で扱え、HyDE のような Retriever ラッパーや、Reranker を組み込んだ `RerankedRetriever` のように、別の検索器をラップする形でも自由に組み合わせられます。
 
 検索でやり取りする単位は LangChain の `Document` で、本文（`page_content`）とメタデータ（`metadata`）を持ちます。
 `metadata` に `doc_id` やタグを入れておくことで、後段のフィルタや評価で使えます。
@@ -261,7 +262,7 @@ Dense Retrieval は、テキストを意味ベクトルに変換し、クエリ�
 ### 埋め込みモデル（ruri-v3）
 
 日本語向けの埋め込みモデルとして `cl-nagoya/ruri-v3-310m` を使いました。
-ruri-v3 は、クエリと文書でプレフィックス（`検索クエリ: ` / `検索文書: `）を使い分けると精度が上がるよう学習されています。
+ruri-v3 は、クエリと文書でプレフィックス（`検索クエリ: ` / `検索文書: `）を付けて使う想定のモデルです。
 `langchain_huggingface.HuggingFaceEmbeddings` でも `encode_kwargs` / `query_encode_kwargs` を使ってクエリ・文書で設定を分けられますが、今回はプレフィックス付与の挙動を明示的に確認しやすくするため、`Embeddings` を継承した薄いラッパーを自作しました。
 
 ```python
@@ -307,7 +308,7 @@ def load_faiss(save_dir, embeddings):
                             allow_dangerous_deserialization=True)
 ```
 
-`load_local` の `allow_dangerous_deserialization=True` は LangChain のセキュリティ仕様で必須です（自分で作ったインデックスなので有効化しています）。
+`load_local` では pickle を含むローカルファイルを読み込むため、LangChain では安全上の理由から `allow_dangerous_deserialization=True` を明示する必要があります。今回は自分で作成したインデックスだけを読み込む前提なので有効化しています。
 
 検索は、FAISS ストアを Retriever 化して使います。
 
@@ -330,7 +331,7 @@ results = retriever.invoke("RAG の精度を上げるには？")
 
 BM25 は、TF-IDF を発展させた語彙ベースのキーワード検索です。
 Dense 検索が意味の近さで文書を拾うのに対し、BM25 は語の一致でスコアリングします。
-そのため「uv」「FAISS」「ruri-v3」のような固有名詞・専門用語・略語に強いのが特徴です。
+そのため「uv」「FAISS」「ruri-v3」のような固有名詞・専門用語・略語を、表記が一致する形で拾いたい場合に強いのが特徴です。
 
 日本語はスペースで単語が区切られないため、`fugashi`（MeCab ラッパー）+ `unidic-lite` で形態素解析してトークン化してから `rank-bm25` に渡します。
 
@@ -398,7 +399,12 @@ class HybridRetriever(BaseRetriever):
                 rrf_scores[key] = rrf_scores.get(key, 0.0) + 1.0 / (self.k + rank + 1)
                 doc_map[key] = doc
         ranked = sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True)
-        return [doc_map[key] for key, _ in ranked[: self.top_k]]
+        results = []
+        for key, score in ranked[: self.top_k]:
+            doc = copy(doc_map[key])
+            doc.metadata = {**doc.metadata, "rrf_score": float(score)}
+            results.append(doc)
+        return results
 ```
 
 ```python
@@ -792,7 +798,7 @@ def ndcg_at_k(ranked, relevant, k):
 Dense 検索から始めて、BM25・ハイブリッド・リランキングと積み上げ、HyDE やマルチクエリでクエリを変換し、親子チャンクで文脈の粒度を変え、最後に Corrective RAG で能動的な検索ループまで実装しました。
 一通り手を動かしてみると、各手法が「パイプラインのどこを担い、何をしようとしているのか」が整理できました。
 
-今後は、Contextual Retrieval や GraphRAGなど、発展的な内容を試してみたいなと思っています。
+今後は、Contextual Retrieval や GraphRAG など、発展的な内容を試してみたいなと思っています。
 
 なお、この記事に載せたコードはあくまで抜粋です。
-動く実装の全体は リポジトリにあるので、よければそちらも覗いてみてください。
+動く実装の全体はリポジトリにあるので、よければそちらも覗いてみてください。

@@ -630,23 +630,110 @@ def build_dense_retriever(store, top_k=10, mmr=False, lambda_mult=0.5, fetch_k=5
 
 ## 生成（Generation）
 
-<!-- メモ:
-- RAGGenerator（generation.py）：取得した文書をプロンプトに入れて LLM で回答生成
-- 文脈整形：_format_doc で各文書に「[1] source: タイトル」と出典番号を付ける（回答に出典を含めやすくなる）
-- ハルシネーション抑制：システムプロンプトに「与えられた文書に根拠がなければ推測せず、分からないと答えて」
-- lost-in-the-middle 対策：LongContextReorder で重要文書を先頭/末尾へ寄せる（reorder フラグ）。LCEL チェーンの外で並べ替えてから context を組み立てる点に注意
-- コード：generation.py（RAGGenerator.generate / _format_doc / LongContextReorder）
--->
+検索した文書をプロンプトに入れて LLM に回答させるのが生成です。
+`RAGGenerator`（`generation.py`）がこれを担います。ポイントは次のとおりです。
+
+- **文脈の整形と出典付け**：各文書に `[1] source: 記事タイトル` のように番号と出典を付けてから渡します（回答に出典番号を含めやすくなります）。
+- **ハルシネーション抑制**：システムプロンプトに「与えられた文書に根拠がなければ推測せず、分からないと答えてください」を入れています。
+- **lost-in-the-middle 対策**：`LongContextReorder` で重要な文書を先頭・末尾に寄せます（下で説明します）。
+
+```python
+# src/rag/generation.py（抜粋）
+_PROMPT = ChatPromptTemplate.from_messages([
+    ("system", "必ず日本語のみで答えてください。"
+               "与えられた文書に根拠がない内容は推測せず、分からないと答えてください。"),
+    ("user", "以下の文書を参考に、質問に答えてください。\n\n文書:\n{context}\n\n質問: {query}"),
+])
+
+def _format_doc(doc, i):
+    source = doc.metadata.get("title") or doc.metadata.get("doc_id", f"doc-{i}")
+    return f"[{i}] source: {source}\n{doc.page_content}"
+
+class RAGGenerator(BaseModel):
+    model: str = "qwen2.5:7b"
+    reorder: bool = False
+    _chain: Runnable = PrivateAttr()           # _PROMPT | ChatOllama | StrOutputParser
+    _reorderer: LongContextReorder | None = PrivateAttr(default=None)
+
+    def generate(self, query, docs):
+        ordered = self._reorderer.transform_documents(docs) if self._reorderer else docs
+        context = "\n---\n".join(_format_doc(d, i) for i, d in enumerate(ordered, 1))
+        return self._chain.invoke({"context": context, "query": query})
+```
+
+実装は **LCEL（LangChain Expression Language）** で書いています。
+LCEL は `prompt | llm | parser` のように `|` でコンポーネントをつなぎ、1 つの `Runnable`（`invoke` で実行できるパイプライン）にする記法です。
+ここでは「プロンプト → `ChatOllama` → 文字列パーサ」をつないでいます。
+
+ちなみに、システムプロンプトに「必ず日本語のみで答えてください」と入れているのは、`qwen2.5:7b` が中国製モデルだからか、日本語で聞いてもたまに中国語で返ってきたからです。仕方なく日本語を明示しています（それでもたまに中国語で返ってきましたが……）。
+
+### lost-in-the-middle 対策（LongContextReorder）
+
+LLM は、長いコンテキストの**中間にある情報を見落としやすい**ことが知られています。
+これは [Lost in the Middle: How Language Models Use Long Contexts](https://arxiv.org/abs/2307.03172)（Liu et al., 2023）で報告された現象で、関連情報が先頭や末尾にあるときは性能が高く、中間にあると大きく低下する、というものです。
+LangChain にはこれに対応する `LongContextReorder` が用意されているので、`reorder=True` のときはこれで重要な文書を先頭と末尾に寄せて渡しています。
+並べ替えは LCEL チェーンの中ではなく、チェーンに渡す前の Python 側で行っています（チェーンは整形済みの `context` 文字列を受け取るだけです）。
 
 ## 能動的な検索（Agentic RAG / Corrective RAG）
 
-<!-- メモ:
-- ここまでは「1 回検索 → 生成」の静的パイプライン。能動的（Agentic）な RAG は LLM が検索プロセスを制御する。その代表として Corrective RAG（CRAG）を実装した（CRAG は Agentic / Adaptive RAG の一種）
-- CRAG の流れ：retrieve → grade（文書ごとに LLM-as-Judge で relevant か判定）→ relevant なら generate / not_relevant なら rewrite_query して再検索（max_retries 超過で打ち切り）。LangGraph の StateGraph で実装
-- ポイント：original_query と search_query を分離（クエリを書き換えても回答は元質問に対して生成）。文書は 1 件ずつ判定（全件まとめだと無関係が混ざる）。グレーディングにドメイン（IT/プログラミング）を明示しないと誤判定（"uv" を紫外線と解釈など）
-- Self-RAG は「違いを一言だけ」：検索要否の判断（Adaptive Retrieval）と生成の忠実性チェックが追加される点。深掘りは別記事
-- コード：graph/corrective_rag.py build_corrective_rag（retrieve / grade_documents / generate / rewrite_query ノード）
--->
+ここまでは「1 回検索して生成する」静的なパイプラインでした。
+**能動的（Agentic）な RAG** は、LLM が検索プロセス自体を制御します。その代表例として **Corrective RAG（CRAG）** を実装しました（CRAG は Agentic / Adaptive RAG の一種です）。
+
+CRAG は、取得した文書を LLM が「関連あるか」自己評価し、不十分なら**クエリを書き換えて再検索する**ループを持ちます。
+
+```mermaid
+flowchart LR
+    R[retrieve] --> G{grade<br/>関連あり？}
+    G -->|relevant| GEN[generate] --> A[回答]
+    G -->|not_relevant| RW[rewrite_query] --> R
+```
+
+これを LangGraph の状態機械（`StateGraph`）として実装しました。
+
+```python
+# src/rag/graph/corrective_rag.py（抜粋）
+class RAGState(TypedDict):
+    original_query: str   # ユーザーの元の質問（生成に使う。書き換えない）
+    search_query: str     # 実際の検索クエリ（rewrite_query で更新）
+    documents: list[Document]
+    grade: str            # "relevant" | "not_relevant"
+    retries: int
+
+def build_corrective_rag(retriever, generator, max_retries=2):
+    def retrieve(state):
+        return {"documents": retriever.invoke(state["search_query"])}
+
+    def grade_documents(state):
+        # 文書を1件ずつ judge し、関連ありだけ残す
+        relevant = []
+        for doc in state["documents"]:
+            verdict = grade_chain.invoke({"query": state["search_query"],
+                                          "context": doc.page_content}).strip().lower()
+            if verdict.startswith("relevant"):
+                relevant.append(doc)
+        return {"documents": relevant, "grade": "relevant" if relevant else "not_relevant"}
+
+    def generate(state):
+        # 回答は書き換え後ではなく「元の質問」に対して生成する
+        return {"answer": generator.generate(state["original_query"], state["documents"])}
+
+    def rewrite_query(state):
+        new_q = rewrite_chain.invoke({"query": state["search_query"]}).strip()
+        return {"search_query": new_q, "retries": state.get("retries", 0) + 1}
+    ...
+```
+
+実装上のポイントが 3 つあります。
+
+- **`original_query` と `search_query` を分ける**：検索クエリは書き換えても、最終的な回答は「ユーザーが最初に入力した質問」に対して生成します。
+- **文書は 1 件ずつ判定する**：まとめて判定すると、無関係な文書が混ざっていても通ってしまうためです。
+- **グレーディングにドメインを明示する**：プロンプトに「IT・プログラミングの文脈」と書かないと、「uv」を紫外線と解釈するなどの誤判定が起きました。
+
+### Self-RAG
+
+Self-RAG も、能動的な RAG の一手法です。
+生成の過程でモデル自身が「そもそも検索が必要か」「取得した文書は関連するか」「生成が文書に基づいているか」を、reflection token と呼ばれる特別なトークンを使って自己評価します。
+これにより、検索が不要なクエリには検索せずに答えたり、根拠の薄い生成を抑えたりできます。
 
 ## 評価の基礎
 

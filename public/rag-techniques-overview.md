@@ -486,7 +486,7 @@ filtered = TagFilteredRetriever(base_retriever=hybrid, tags=["Python", "uv"])
 retriever = RerankedRetriever(base_retriever=filtered, reranker=CrossEncoderReranker(top_n=5))
 ```
 
-候補を多めに取ってから絞るのが前提です（タグが付いていない文書は除外される点にも注意）。
+候補を多めに取ってから絞るのが前提です。
 
 ## クエリ変換（HyDE・マルチクエリ・分解）
 
@@ -549,19 +549,84 @@ class DecomposeRetriever(BaseRetriever):
 
 ## 親子チャンク（Parent-Child）
 
-<!-- メモ:
-- 検索は小さい子チャンク（精度）、文脈として返すのは親の大きいチャンク（情報量）= small-to-big
-- 実装：langchain-classic の ParentDocumentRetriever + InMemoryStore。空の faiss.IndexFlatL2 を直接作る（FAISS.from_texts のダミー文書がノイズになるのを回避）。child_k で子の取得件数
-- BaseRetriever なので Reranker などのラッパーと組み合わせ可
-- コード：parent_child.py build_parent_child_retriever
--->
+親子チャンクは、「小さいチャンクで検索し、大きいチャンクを文脈として返す」手法です（small-to-big）。
+
+```text
+検索（子チャンク 200字）→ ヒット → 対応する親チャンク（1000字）を文脈として返す
+```
+
+小さい子チャンクは意味が凝縮されていて検索精度が高く、LLM には文脈の多い親チャンクを渡せる、という両取りを狙います。
+
+実装には `langchain-classic` の **`ParentDocumentRetriever`** を使いました（LangChain 1.x 本体には含まれず classic に残っています）。
+これは初期化時に空のベクトルストア（`vectorstore`）と保管庫（`docstore`）を受け取り、`add_documents(docs)` を呼ぶと内部で文書を親 → 子に 2 段分割しながら、
+
+- **子チャンク**を埋め込んで `vectorstore` に追加し、検索に使う
+- **親チャンク**を id をキーに `docstore` へ入れておく
+
+という形で中身を自分で管理します。検索時は子チャンクをベクトル検索し、ヒットした子が属する親を `docstore` から引いて返します。
+
+`docstore` には `InMemoryStore`（メモリ上の Key-Value ストア）を使いました。
+親チャンクをメモリに置くだけのシンプルな実装で、永続化はしません（サンドボックスなので毎回作り直す前提。本番なら永続ストアに差し替えます）。
+
+```python
+# src/rag/retrievers/parent_child.py（抜粋）
+import faiss
+from langchain_classic.retrievers import ParentDocumentRetriever
+from langchain_core.stores import InMemoryStore
+from langchain_community.docstore.in_memory import InMemoryDocstore
+
+def build_parent_child_retriever(docs, parent_size=1000, child_size=200, child_k=50):
+    parent_splitter = RecursiveCharacterTextSplitter(chunk_size=parent_size, chunk_overlap=0)
+    child_splitter = RecursiveCharacterTextSplitter(chunk_size=child_size, chunk_overlap=0)
+    # 空の FAISS（次元数を直接指定して作る）
+    emb = PrefixedEmbeddings()
+    dim = len(emb.embed_query("dimension check"))
+    vectorstore = FAISS(embedding_function=emb, index=faiss.IndexFlatL2(dim),
+                        docstore=InMemoryDocstore(), index_to_docstore_id={})
+    retriever = ParentDocumentRetriever(
+        vectorstore=vectorstore,          # 子チャンクの検索用（空で渡す）
+        docstore=InMemoryStore(),         # 親チャンクの保管用
+        parent_splitter=parent_splitter,
+        child_splitter=child_splitter,
+        search_kwargs={"k": child_k},
+    )
+    retriever.add_documents(docs)
+    return retriever
+```
+
+普通の Dense Retriever なら `FAISS.from_documents(chunks, emb)` で直接作れますが、`ParentDocumentRetriever` には「空の入れ物」を渡す必要があります。
+`FAISS.from_texts([""], emb)` は次元数を推定するために 1 件の文書が要るので、`faiss.IndexFlatL2(dim)` で次元数を直接指定し、本当に空のインデックスを作っています。
+
+なお、コード中の `InMemoryStore` は親チャンク用の保管庫、`InMemoryDocstore` は FAISS が子チャンクの実体を持つための内部ストアです。
+
+`ParentDocumentRetriever` も `BaseRetriever` なので、Reranker と組み合わせられます。
+
+```python
+base = build_parent_child_retriever(docs, child_k=50)
+retriever = RerankedRetriever(base_retriever=base, reranker=CrossEncoderReranker(top_n=5))
+```
 
 ## 検索結果の調整（MMR）
 
-<!-- メモ:
-- MMR（Maximal Marginal Relevance）：関連度と多様性のバランス（似た文書ばかりを防ぐ）。FAISS as_retriever(search_type="mmr", lambda_mult, fetch_k)。0.0=多様性 / 1.0=関連性。dense.py の mmr オプションとして実装
-- コード：dense.py（mmr）
--->
+通常の Dense 検索は「クエリに最も近い文書」を上位に並べるため、似た内容の文書ばかりが返ることがあります。
+MMR（Maximal Marginal Relevance）は、関連度と多様性のバランスを取りながら文書を選ぶ手法です。
+
+`fetch_k` 件の候補から、関連度と「すでに選んだ文書との重複の少なさ」を見て `top_k` 件を選びます。
+`lambda_mult` は `1.0` で関連度重視、`0.0` で多様性重視です。
+FAISS の `as_retriever` に `search_type="mmr"` を指定するだけで使えます。
+
+```python
+# src/rag/retrievers/dense.py
+def build_dense_retriever(store, top_k=10, mmr=False, lambda_mult=0.5, fetch_k=50):
+    if mmr:
+        return store.as_retriever(
+            search_type="mmr",
+            search_kwargs={"k": top_k, "fetch_k": fetch_k, "lambda_mult": lambda_mult},
+        )
+    return store.as_retriever(search_kwargs={"k": top_k})
+```
+
+`fetch_k=50` 件の候補から、多様性を考慮して `top_k` 件を選ぶ形です。
 
 ## 生成（Generation）
 

@@ -18,7 +18,7 @@ ignorePublish: false
 私は現在、RAG（Retrieval-Augmented Generation）の発展的な手法を習得するために、勉強や実装を進めているのですが、その過程で、これまで使ってきた基礎的な RAG 技術を、一度きちんと整理し直しておきたいと考えました。
 
 そこで、2026 年 6 月現在のできるだけ新しい LangChain モジュールを使い、RAG の基礎的な処理フローを一通り実行できるリポジトリを作ってみました。
-この記事はその整理のまとめです。
+この記事はその整理の簡単なまとめです。
 
 https://github.com/atsushi11o7/rag-sandbox
 
@@ -204,38 +204,201 @@ flowchart TB
 
 ## チャンク分割
 
-<!-- メモ:
-- なぜ分割するか（コンテキスト長・検索粒度）、小さすぎ=文脈不足 / 大きすぎ=ノイズ
-- 実装：RecursiveCharacterTextSplitter。日本語向け separators ["\n\n","\n","。","、"," ",""] を明示（英語デフォルトだと日本語が切れない）。chunk_id="doc_id#i" を付与（評価で追跡）
-- コード：src/rag/chunking.py split_documents
-- 正直に：戦略は再帰分割 1 種（固定長/意味分割の比較はしていない）
--->
+LLM のコンテキスト長や検索精度の都合で、文書は適切な粒度に分割します。
+小さすぎると文脈が失われ、大きすぎるとノイズが増えます。
+
+実装には LangChain の `RecursiveCharacterTextSplitter` を使いました。
+これは、渡した区切り文字のリストを優先順位の高い順に試すスプリッターです。
+まず先頭の区切り（段落区切りの `\n\n`）で分け、それでも `chunk_size` を超えるチャンクは、次の区切り（`\n` → `。` → `、` → …）で再帰的に分け直します。
+こうして「できるだけ大きな意味のまとまり（段落 → 行 → 文）を保ちつつ、`chunk_size` に収める」のが狙いです。
+リスト末尾の `""` は、どの区切りでも収まらないときに文字単位で強制分割するためのフォールバックです。
+
+デフォルトの区切り（`\n\n` → `\n` → スペース）は、単語がスペースで区切られない日本語ではうまく機能しません。
+そこで、句点（`。`）・読点（`、`）を含む区切りリストを明示しています。
+
+```python
+# src/rag/chunking.py
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+
+_DEFAULT_SEPARATORS = ["\n\n", "\n", "。", "、", " ", ""]
+
+def split_documents(docs, chunk_size=500, chunk_overlap=100):
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap,
+        separators=_DEFAULT_SEPARATORS,
+    )
+    chunks = []
+    for doc in docs:
+        doc_chunks = splitter.split_documents([doc])
+        for i, chunk in enumerate(doc_chunks):
+            chunk.metadata["chunk_id"] = f"{chunk.metadata['doc_id']}#{i}"
+        chunks.extend(doc_chunks)
+    return chunks
+```
+
+`chunk_id` を `"doc_id#連番"` の形で振っておくと、後で評価するときに「どの記事のどのチャンクか」を追跡できます。
+`chunk_overlap` は、隣り合うチャンクで文脈が途切れないようにするための重複分です。
+
+なお今回試したのは再帰分割の 1 種類だけで、固定長や意味ベースの分割との比較まではしていません。
 
 ## 埋め込みとベクトル検索（Dense・FAISS）
 
-<!-- メモ:
-- Dense = 意味ベクトル化して類似度ランキング。モデル cl-nagoya/ruri-v3-310m（日本語特化、クエリ/文書でプレフィックス切替）
-- HuggingFaceEmbeddings はプレフィックス切替非対応 → Embeddings 継承の薄いラッパー PrefixedEmbeddings。normalize_embeddings=True で FAISS の L2 ≒ cosine
-- FAISS：build_faiss / load_faiss（allow_dangerous_deserialization）。build_dense_retriever
-- コード：embeddings.py（embed_query/embed_documents のプレフィックス）/ store.py / dense.py
--->
+Dense Retrieval は、テキストを意味ベクトルに変換し、クエリとの類似度で文書をランキングする手法です。
+このベクトル化を担うのが埋め込みモデルです。
+
+### 埋め込みモデル（ruri-v3）
+
+日本語向けの埋め込みモデルとして `cl-nagoya/ruri-v3-310m` を使いました。
+ruri-v3 は、クエリと文書でプレフィックス（`検索クエリ: ` / `検索文書: `）を使い分けると精度が上がるよう学習されています。
+LangChain の `HuggingFaceEmbeddings` はこのプレフィックス切り替えに対応していないため、`Embeddings` を継承した薄いラッパーを書きました。
+
+```python
+# src/rag/embeddings.py
+from langchain_core.embeddings import Embeddings
+from sentence_transformers import SentenceTransformer
+
+class PrefixedEmbeddings(Embeddings):
+    def __init__(self, model_name="cl-nagoya/ruri-v3-310m",
+                 query_prefix="検索クエリ: ", doc_prefix="検索文書: "):
+        self._model = SentenceTransformer(model_name)
+        self._query_prefix = query_prefix
+        self._doc_prefix = doc_prefix
+
+    def embed_documents(self, texts):
+        vecs = self._model.encode([self._doc_prefix + t for t in texts],
+                                  normalize_embeddings=True, convert_to_numpy=True)
+        return vecs.astype("float32").tolist()
+
+    def embed_query(self, text):
+        vec = self._model.encode(self._query_prefix + text,
+                                 normalize_embeddings=True, convert_to_numpy=True)
+        return vec.astype("float32").tolist()
+```
+
+`normalize_embeddings=True` でベクトルを L2 正規化すると、FAISS の L2 距離が cosine 類似度と等価になります。
+
+### FAISS でインデックスを作る
+
+ベクトルストアには FAISS を使いました。
+
+```python
+# src/rag/store.py
+from langchain_community.vectorstores import FAISS
+
+def build_faiss(docs, embeddings, save_dir):
+    store = FAISS.from_documents(docs, embeddings)
+    store.save_local(save_dir)
+    return store
+
+def load_faiss(save_dir, embeddings):
+    return FAISS.load_local(save_dir, embeddings,
+                            allow_dangerous_deserialization=True)
+```
+
+`load_local` の `allow_dangerous_deserialization=True` は LangChain のセキュリティ仕様で必須です（自分で作ったインデックスなので有効化しています）。
+
+検索は、FAISS ストアを Retriever 化して使います。
+
+```python
+# src/rag/retrievers/dense.py
+def build_dense_retriever(store, top_k=10):
+    return store.as_retriever(search_kwargs={"k": top_k})
+```
+
+```python
+# 使い方
+emb = PrefixedEmbeddings()
+chunks = split_documents(load_md_corpus("data/corpus"))
+store = build_faiss(chunks, emb, "data/index/faiss")
+retriever = build_dense_retriever(store, top_k=5)
+results = retriever.invoke("RAG の精度を上げるには？")
+```
 
 ## キーワード検索（BM25 + 形態素解析）
 
-<!-- メモ:
-- Dense の弱点（固有名詞・専門用語・略語＝uv / FAISS / ruri-v3 など）を語彙一致で補完
-- BM25（TF-IDF の発展）。日本語は分かち書きが必要 → fugashi（MeCab）+ unidic-lite でトークン化 → rank-bm25 の BM25Okapi
-- 実装：JapaneseBM25Retriever。重いオブジェクト（Tagger / BM25Okapi）は PrivateAttr + model_validator(mode="after") で初期化
-- コード：bm25.py の _tokenize / _get_relevant_documents
--->
+BM25 は、TF-IDF を発展させた語彙ベースのキーワード検索です。
+Dense 検索が意味の近さで文書を拾うのに対し、BM25 は語の一致でスコアリングします。
+そのため「uv」「FAISS」「ruri-v3」のような固有名詞・専門用語・略語に強いのが特徴です。
+
+日本語はスペースで単語が区切られないため、`fugashi`（MeCab ラッパー）+ `unidic-lite` で形態素解析してトークン化してから `rank-bm25` に渡します。
+
+```python
+# src/rag/retrievers/bm25.py（抜粋）
+from fugashi import Tagger
+from rank_bm25 import BM25Okapi
+from langchain_core.retrievers import BaseRetriever
+from pydantic import PrivateAttr, model_validator
+
+class JapaneseBM25Retriever(BaseRetriever):
+    docs: list[Document]
+    k: int = 10
+    _tagger: Tagger = PrivateAttr()
+    _bm25: BM25Okapi = PrivateAttr()
+
+    @model_validator(mode="after")
+    def _build_index(self):
+        self._tagger = Tagger()
+        tokenized = [self._tokenize(d.page_content) for d in self.docs]
+        self._bm25 = BM25Okapi(tokenized)
+        return self
+
+    def _tokenize(self, text):
+        return [w.surface for w in self._tagger(text)]  # 表層形でトークン化
+
+    def _get_relevant_documents(self, query, *, run_manager):
+        scores = self._bm25.get_scores(self._tokenize(query))
+        ranked = sorted(
+            [(d, float(s)) for d, s in zip(self.docs, scores) if s > 0],
+            key=lambda x: x[1], reverse=True,
+        )
+        return [d for d, _ in ranked[: self.k]]
+```
+
+`Tagger` や `BM25Okapi` は重いので、Pydantic の `PrivateAttr`（シリアライズ対象外）として持ち、`model_validator(mode="after")` でインスタンス化後に一度だけ構築しています。
 
 ## ハイブリッド検索（RRF）
 
-<!-- メモ:
-- Dense（意味）+ BM25（語彙）を統合。RRF（Reciprocal Rank Fusion）= Σ 1/(k+rank)、k=60（標準値）。スケールの違う 2 手法を順位ベースで統合
-- 実装：HybridRetriever（candidate_k=50 で多めに取得 → RRF → top_k）。chunk_id/doc_id で名寄せ
-- コード：hybrid.py _get_relevant_documents（RRF 本体）
--->
+ハイブリッド検索は、Dense 検索（意味）と BM25（語彙）の結果を組み合わせる手法です。
+2 つはスコアのスケールが違うので、順位ベースで統合する **RRF（Reciprocal Rank Fusion）** を使いました。
+RRF は、各検索結果の「順位の逆数」を足し合わせてスコアにします。
+
+```text
+RRF スコア = Σ 1 / (k + rank)   （k=60、rank は 1 始まり）
+```
+
+`k=60` は順位差をならすための定数で、RRF の標準値としてよく使われます。
+
+```python
+# src/rag/retrievers/hybrid.py（抜粋）
+class HybridRetriever(BaseRetriever):
+    retrievers: list[BaseRetriever]
+    k: int = 60          # RRF の平滑化定数
+    candidate_k: int = 50
+    top_k: int = 10
+
+    def _get_relevant_documents(self, query, *, run_manager):
+        rrf_scores: dict[str, float] = {}
+        doc_map: dict[str, Document] = {}
+        for retriever in self.retrievers:
+            results = retriever.invoke(query)
+            for rank, doc in enumerate(results[: self.candidate_k]):
+                key = doc.metadata.get("chunk_id") or doc.metadata.get("doc_id")
+                rrf_scores[key] = rrf_scores.get(key, 0.0) + 1.0 / (self.k + rank + 1)
+                doc_map[key] = doc
+        ranked = sorted(rrf_scores.items(), key=lambda x: x[1], reverse=True)
+        return [doc_map[key] for key, _ in ranked[: self.top_k]]
+```
+
+```python
+# 使い方
+dense = build_dense_retriever(store, top_k=50)
+bm25 = JapaneseBM25Retriever.from_documents(chunks, k=50)
+hybrid = HybridRetriever(retrievers=[dense, bm25], candidate_k=50, top_k=10)
+results = hybrid.invoke("uv の利点は？")
+```
+
+各検索で多めに候補（50 件）を取り、RRF で統合してから上位を返す構成にしています。
 
 ## リランキング（Cross-Encoder / 日本語 Reranker）
 

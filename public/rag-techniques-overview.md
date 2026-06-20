@@ -813,7 +813,7 @@ def ndcg_at_k(ranked, relevant, k):
 - **Faithfulness**：回答が検索文書に基づいているか（ハルシネーションの検出）
 - **Answer Relevance**：回答が質問に答えているか
 
-[RAGAS](https://docs.ragas.io/) などのフレームワークを使うと、LLM-as-Judge でこれらを自動評価できます。
+[RAGAS](https://docs.ragas.io/) などのフレームワークを使うと、LLM-as-Judge を中心に、Faithfulness や Answer Relevance などの指標を自動評価できます。
 
 ## おわりに
 

@@ -37,7 +37,7 @@ LLM は学習した時点の知識しか持たず、最新の情報や手元の�
 
 実行環境は CUDA 12.6 + Python 3.12 の devcontainer で、パッケージ管理は uv（`uv.lock` で固定）を使っています。
 
-Dockerfile や divcontainer の設定はリポジトリにあるので、そちらを参照してください。
+Dockerfile や devcontainer の設定はリポジトリにあるので、そちらを参照してください。
 
 <details><summary>pyproject.toml（依存一覧）</summary>
 

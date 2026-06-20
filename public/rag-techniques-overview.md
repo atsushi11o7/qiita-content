@@ -120,11 +120,11 @@ llm = ChatOllama(model="qwen2.5:7b", base_url=host) if host else ChatOllama(mode
 | パッケージ | バージョン | 役割 |
 |---|---|---|
 | `langchain-core` | 1.4.8 | 抽象基底クラス（`BaseRetriever` / `Document` / `Embeddings`） |
-| `langchain` | 1.3.10 | 高レベル API（`ContextualCompressionRetriever` など） |
+| `langchain` | 1.3.10 | v1 系の高レベル API / agents 周辺 |
 | `langchain-community` | 0.4.2 | サードパーティ統合（`FAISS` / `LongContextReorder`） |
 | `langchain-text-splitters` | 1.1.2 | テキスト分割（`RecursiveCharacterTextSplitter`） |
 | `langchain-ollama` | 1.1.0 | Ollama 連携（`ChatOllama`） |
-| `langchain-classic` | 1.0.8 | 旧 API の互換（`ParentDocumentRetriever`） |
+| `langchain-classic` | 1.0.8 | 旧 retriever 系 API（`ParentDocumentRetriever` / `ContextualCompressionRetriever` など） |
 | `langgraph` | 1.2.6 | 状態グラフ（Corrective RAG に使用） |
 
 埋め込み・検索まわりで使っている主なライブラリは次のとおりです。
@@ -132,7 +132,7 @@ llm = ChatOllama(model="qwen2.5:7b", base_url=host) if host else ChatOllama(mode
 | ライブラリ | 役割 |
 |---|---|
 | `sentence-transformers` | Dense 埋め込み（`SentenceTransformer` / ruri-v3）と Cross-Encoder リランカー（`CrossEncoder` / ruri-reranker-large） |
-| `faiss-cpu` | ベクトルインデックスと近似最近傍探索 |
+| `faiss-cpu` | ベクトルインデックスと類似検索 |
 | `fugashi` + `unidic-lite` | 日本語の形態素解析（BM25 のトークナイザー） |
 | `rank-bm25` | BM25 スコアリング |
 
@@ -262,7 +262,7 @@ Dense Retrieval は、テキストを意味ベクトルに変換し、クエリ�
 
 日本語向けの埋め込みモデルとして `cl-nagoya/ruri-v3-310m` を使いました。
 ruri-v3 は、クエリと文書でプレフィックス（`検索クエリ: ` / `検索文書: `）を使い分けると精度が上がるよう学習されています。
-LangChain の `HuggingFaceEmbeddings` はこのプレフィックス切り替えに対応していないため、`Embeddings` を継承した薄いラッパーを書きました。
+`langchain_huggingface.HuggingFaceEmbeddings` でも `encode_kwargs` / `query_encode_kwargs` を使ってクエリ・文書で設定を分けられますが、今回はプレフィックス付与の挙動を明示的に確認しやすくするため、`Embeddings` を継承した薄いラッパーを自作しました。
 
 ```python
 # src/rag/embeddings.py
@@ -291,7 +291,7 @@ class PrefixedEmbeddings(Embeddings):
 
 ### FAISS でインデックスを作る
 
-ベクトルストアには FAISS を使いました。
+ベクトルストアには FAISS を使いました。今回はシンプルに Flat index（`IndexFlatL2`、正確な全探索）を使っています。
 
 ```python
 # src/rag/store.py
@@ -444,11 +444,16 @@ class CrossEncoderReranker(BaseDocumentCompressor):
         pairs = [(query, d.page_content) for d in documents]
         scores = self._model.predict(pairs)
         ranked = sorted(zip(documents, scores), key=lambda x: x[1], reverse=True)
-        return [d for d, _ in ranked[: self.top_n]]
+        results = []
+        for doc, score in ranked[: self.top_n]:
+            new_doc = copy(doc)
+            new_doc.metadata = {**doc.metadata, "rerank_score": float(score)}
+            results.append(new_doc)
+        return results
 ```
 
-`BaseDocumentCompressor` を継承しておくと、LangChain の `ContextualCompressionRetriever` に組み込めます。
-これを利用して、ハイブリッド検索の上に Reranker を重ねられます。
+`BaseDocumentCompressor` を継承しておくと、`langchain-classic` の `ContextualCompressionRetriever` にも組み込めます。
+ただし今回は LangChain v1 系に寄せるため、独自の `RerankedRetriever` でラップしています（ハイブリッド検索の上に Reranker を重ねられます）。
 
 ```python
 # 使い方（hybrid → rerank）
@@ -457,6 +462,8 @@ retriever = RerankedRetriever(
     reranker=CrossEncoderReranker(top_n=5),
 )
 ```
+
+なお実装では、デバッグしやすいように `bm25_score` / `rrf_score` / `rerank_score` を各文書の `metadata` に入れています。
 
 ## メタデータフィルタリング
 
@@ -671,15 +678,17 @@ LCEL は `prompt | llm | parser` のように `|` でコンポーネントをつ
 
 LLM は、長いコンテキストの**中間にある情報を見落としやすい**ことが知られています。
 これは [Lost in the Middle: How Language Models Use Long Contexts](https://arxiv.org/abs/2307.03172)（Liu et al., 2023）で報告された現象で、関連情報が先頭や末尾にあるときは性能が高く、中間にあると大きく低下する、というものです。
-LangChain にはこれに対応する `LongContextReorder` が用意されているので、`reorder=True` のときはこれで重要な文書を先頭と末尾に寄せて渡しています。
+LangChain にはこれに対応する `LongContextReorder` が用意されています。`reorder=True` のときは、検索器や Reranker が関連度順に並べた文書列を前提に、重要そうな文書を先頭と末尾へ寄せてから渡します。
 並べ替えは LCEL チェーンの中ではなく、チェーンに渡す前の Python 側で行っています（チェーンは整形済みの `context` 文字列を受け取るだけです）。
 
 ## 能動的な検索（Agentic RAG / Corrective RAG）
 
 ここまでは「1 回検索して生成する」静的なパイプラインでした。
-**能動的（Agentic）な RAG** は、LLM が検索プロセス自体を制御します。その代表例として **Corrective RAG（CRAG）** を実装しました（CRAG は Agentic / Adaptive RAG の一種です）。
+**能動的（Agentic）な RAG** は、LLM が検索プロセス自体を制御します（CRAG は Agentic / Adaptive RAG の一種です）。
+その代表例である **Corrective RAG（CRAG）** の考え方を参考に、今回は「検索 → 関連性評価 → 不十分ならクエリ書き換え → 再検索」という最小構成を実装しました。
 
 CRAG は、取得した文書を LLM が「関連あるか」自己評価し、不十分なら**クエリを書き換えて再検索する**ループを持ちます。
+なお、元論文の CRAG は検索結果の信頼度評価や Web 検索による補強なども含む手法で、ここではその中心的な考え方を最小構成で再現しています。
 
 ```mermaid
 flowchart LR
@@ -734,11 +743,12 @@ def build_corrective_rag(retriever, generator, max_retries=2):
 Self-RAG も、能動的な RAG の一手法です。
 生成の過程でモデル自身が「そもそも検索が必要か」「取得した文書は関連するか」「生成が文書に基づいているか」を、reflection token と呼ばれる特別なトークンを使って自己評価します。
 これにより、検索が不要なクエリには検索せずに答えたり、根拠の薄い生成を抑えたりできます。
+なお Self-RAG は、単にプロンプトで自己評価させるだけではなく、reflection token を生成できるようにモデルを学習する点が特徴です。今回は未実装で、概念紹介に留めます。
 
 ## 評価の基礎
 
 手法を変えたときに「良くなったか」を測るには、評価指標が必要です。
-めんどくさかったので、正解ラベルを用意しておらず実測まではしていませんが、どんな指標・方法があるかを整理しておきます。
+今回は正解ラベルの整備までは行っていないため、実測ではなく指標の整理に留めます。
 
 ### 検索の評価
 

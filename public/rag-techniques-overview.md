@@ -15,51 +15,192 @@ ignorePublish: false
 ---
 ## はじめに
 
-<!-- メモ:
-- 位置づけ：RAG の発展系を試す前に、基礎手法を rag-sandbox で実装して手元で動かし、各手法が「パイプラインのどこを担うか」を整理したまとめ
-- 各手法は「概観 + 実装コード」で紹介
-- 深掘り/発展（Contextual Retrieval、GraphRAG、Self-RAG の精緻な実装、セマンティックキャッシュ等）は別記事
-- 対象読者：LLM / 生成AI は知っているが RAG の各手法を整理したい人
--->
+私は現在、RAG（Retrieval-Augmented Generation）の発展的な手法を習得するために、勉強や実装を進めているのですが、その過程で、これまで使ってきた基礎的な RAG 技術を、一度きちんと整理し直しておきたいと考えました。
+
+そこで、2026 年 6 月現在のできるだけ新しい LangChain モジュールを使い、RAG の基礎的な処理フローを一通り実行できるリポジトリを作ってみました。
+この記事はその整理のまとめです。
+
+https://github.com/atsushi11o7/rag-sandbox
+
 
 ## RAG とは
 
-<!-- メモ:
-- RAG（Retrieval-Augmented Generation）= 外部の知識を検索し、その結果を文脈として LLM の生成に与える手法
-- なぜ必要か：LLM 単体は学習時点の知識しか持たず、最新情報・社内/個人の文書を知らない／もっともらしい誤り（hallucination）を出す
-- 検索した根拠を与えることで、正確性・最新性を上げ、出典も示せる
-- 大枠は「検索（Retrieval）＋ 生成（Generation）」。具体的な 3 段構成は次節以降の「基本パイプライン」で
--->
+RAG（Retrieval-Augmented Generation）は、外部の知識を検索し、その結果を文脈として LLM に渡してから回答を生成する手法です。
 
-## 実験環境（devcontainer + uv / Ollama）
+LLM は学習した時点の知識しか持たず、最新の情報や手元の文書については答えられません。
+知らないことをもっともらしく答えてしまう、いわゆるハルシネーションも起きます。
+検索した文書を根拠として与えることで、こうした問題を抑え、回答の正確性や最新性を高められます。
 
-<!-- メモ:
-- CUDA 12.6 + Python 3.12 の devcontainer で統一。パッケージ管理は uv（uv add / uv sync、uv.lock で再現性）。torch は CUDA wheel を別 index から取得（[tool.uv.sources]）
-- 生成・HyDE・CRAG の LLM は Ollama（qwen2.5:7b）。devcontainer の外で起動し docker-compose でサービス化、コンテナ内から OLLAMA_HOST 経由でアクセス
-- コード例：docker-compose.yml 抜粋 / ChatOllama(model, base_url=host)
--->
+大きくは「検索（Retrieval）」と「生成（Generation）」の組み合わせです。
+
+## 実行環境（devcontainer + uv / Ollama）
+
+実行環境は CUDA 12.6 + Python 3.12 の devcontainer で、パッケージ管理は uv（`uv.lock` で固定）を使っています。
+
+Dockerfile や divcontainer の設定はリポジトリにあるので、そちらを参照してください。
+
+<details><summary>pyproject.toml（依存一覧）</summary>
+
+```toml
+[project]
+name = "rag-sandbox"
+version = "0.1.0"
+description = "RAG技術を試すサンドボックス"
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "numpy>=1.26",
+    "pandas>=2.2",
+    "scipy>=1.12",
+    "scikit-learn>=1.5",
+    "transformers>=4.44",
+    "sentence-transformers>=3.0",
+    "FlagEmbedding>=1.2",
+    "fugashi>=1.3",
+    "unidic-lite>=1.0.8",
+    "rank-bm25>=0.2.2",
+    "faiss-cpu>=1.8",
+    "ollama>=0.3",
+    "langgraph>=1.0",
+    "langchain>=1.0",
+    "langchain-core>=1.0",
+    "matplotlib>=3.8",
+    "seaborn>=0.13",
+    "plotly>=5.18",
+    "jupyterlab>=4.0",
+    "ipykernel>=6.29",
+    "ipywidgets>=8.1",
+    "tqdm>=4.66",
+    "joblib>=1.3",
+    "torch>=2.7",
+    "langchain-huggingface>=1.2.2",
+    "langchain-text-splitters>=1.1.2",
+    "langchain-community>=0.4.2",
+    "langchain-ollama>=1.1.0",
+    "langchain-classic>=1.0.8",
+]
+
+[tool.uv.sources]
+torch = [
+    { index = "pytorch-cu126" },
+]
+
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true
+```
+
+</details>
+
+そのまま貼り付けているので、実際には使っていないモジュールも含まれています。
+結果的に使用している LangChain 関連モジュールのバージョンは、次の「LangChain エコシステムの整理」で触れます。
+
+### LLM はローカルの Ollama で
+
+生成・HyDE・Corrective RAG では LLM を呼び出します。
+本来は OpenAI などの API を使うところですが、お金をかけたくなかったので、ローカルに Ollama サーバーを立てて API ライクに使うようにしました（モデルは `qwen2.5:7b`を使用しています）。
+Ollama は devcontainer の外で起動し、Docker Compose でサービス化して、コンテナ内から `OLLAMA_HOST` 経由で呼び出します。
+
+```python
+from langchain_ollama import ChatOllama
+
+host = os.environ.get("OLLAMA_HOST")
+llm = ChatOllama(model="qwen2.5:7b", base_url=host) if host else ChatOllama(model="qwen2.5:7b")
+```
 
 ## LangChain エコシステムの整理
 
-<!-- メモ:
-- 2025 年時点で LangChain はパッケージ分割（langchain-core / -community / -ollama / -text-splitters / -classic / langgraph）。0.0.x 時代の import パスと違う点に注意（例：ParentDocumentRetriever は langchain-classic に残る）
-- 表1：パッケージ → 役割。表2：ライブラリ → 役割（sentence-transformers / FlagEmbedding / faiss-cpu / fugashi+unidic-lite / rank-bm25 / langchain-ollama）
--->
+私が以前 LangChain を使っていたのは 0.0.x の頃でした。
+当時と比べると、現在の 1.x 系は用途ごとにパッケージが細分化されていて、どれを import すればよいか少しややこしくなっています。
+そこで、最初に整理しておきます（たとえば `ParentDocumentRetriever` は本体ではなく `langchain-classic` に移っています）。
+
+今回（2026 年 6 月時点）使った LangChain 関連パッケージとバージョンは次のとおりです。
+
+| パッケージ | バージョン | 役割 |
+|---|---|---|
+| `langchain-core` | 1.4.8 | 抽象基底クラス（`BaseRetriever` / `Document` / `Embeddings`） |
+| `langchain` | 1.3.10 | 高レベル API（`ContextualCompressionRetriever` など） |
+| `langchain-community` | 0.4.2 | サードパーティ統合（`FAISS` / `LongContextReorder`） |
+| `langchain-text-splitters` | 1.1.2 | テキスト分割（`RecursiveCharacterTextSplitter`） |
+| `langchain-ollama` | 1.1.0 | Ollama 連携（`ChatOllama`） |
+| `langchain-classic` | 1.0.8 | 旧 API の互換（`ParentDocumentRetriever`） |
+| `langgraph` | 1.2.6 | 状態グラフ（Corrective RAG に使用） |
+
+埋め込み・検索まわりで使っている主なライブラリは次のとおりです。
+
+| ライブラリ | 役割 |
+|---|---|
+| `sentence-transformers` | Dense 埋め込み（`SentenceTransformer` / ruri-v3）と Cross-Encoder リランカー（`CrossEncoder` / ruri-reranker-large） |
+| `faiss-cpu` | ベクトルインデックスと近似最近傍探索 |
+| `fugashi` + `unidic-lite` | 日本語の形態素解析（BM25 のトークナイザー） |
+| `rank-bm25` | BM25 スコアリング |
 
 ## コーパスの準備（Qiita 公開 API）
 
-<!-- メモ:
-- 題材＝自分の Qiita 記事。公開 API（/users/{user}/items）で全件取得し data/corpus/<id>.md ＋ <id>.json（title/created_at/tags/likes_count/url のサイドカー）
-- コード：scripts/fetch_qiita.py 抜粋 / src/rag/corpus.py の load_md_corpus（md 本文 + json メタを Document に）
-- ポイント：メタを Document.metadata に載せることで後段のタグフィルタが効く
--->
+検索対象のコーパスには、自分の Qiita 記事を使いました。
+Qiita の公開 API（`/users/{user}/items`）から各記事を取得し、本文を `data/corpus/<記事ID>.md`、メタデータ（タイトル・日付・タグなど）を同名の `.json` として保存します。
+
+```python
+# scripts/fetch_qiita.py（抜粋）
+for item in fetch_items(USERNAME, TOKEN):
+    doc_id = item["id"]
+    (OUT_DIR / f"{doc_id}.md").write_text(item["rendered_body"], encoding="utf-8")
+    meta = {
+        "title": item["title"],
+        "created_at": item["created_at"],
+        "tags": [tag["name"] for tag in item.get("tags", [])],
+        "likes_count": item.get("likes_count", 0),
+        "url": item.get("url", ""),
+    }
+    (OUT_DIR / f"{doc_id}.json").write_text(
+        json.dumps(meta, ensure_ascii=False), encoding="utf-8"
+    )
+```
+
+本文（`.md`）とメタデータ（`.json`）をペアで持つのがポイントです。
+読み込み時にサイドカー JSON を `Document.metadata` に載せておくと、あとでタグや日付でフィルタできます（後述の「メタデータフィルタリング」で使います）。
+
+```python
+# src/rag/corpus.py（抜粋）
+def load_md_corpus(corpus_dir: str) -> list[Document]:
+    docs = []
+    for p in sorted(Path(corpus_dir).glob("*.md")):
+        meta: dict = {"doc_id": p.stem}
+        sidecar = p.with_suffix(".json")
+        if sidecar.exists():
+            meta.update(json.loads(sidecar.read_text(encoding="utf-8")))
+        docs.append(Document(page_content=p.read_text(encoding="utf-8"), metadata=meta))
+    return docs
+```
 
 ## RAG の基本パイプライン
 
-<!-- メモ:
-- 3 段：Indexing（分割→埋め込み→FAISS）/ Retrieval（クエリ→埋め込み→類似検索）/ Generation（クエリ+文脈→プロンプト→LLM）
-- テキスト図で示し、「以降の各節がこのどこを担うか」の地図にする
--->
+RAG は大きく、コーパスを事前に検索可能にする「Indexing」と、クエリを受けて検索し回答する「Retrieval + Generation」に分かれます。
+
+```mermaid
+flowchart TB
+    subgraph IDX["Indexing（事前準備）"]
+        D[文書] --> C[チャンク分割]
+        C --> E1[埋め込み]
+        E1 --> VS[(ベクトルストア<br/>FAISS)]
+    end
+
+    subgraph QRY["Retrieval + Generation（クエリ時）"]
+        Q[クエリ] --> E2[埋め込み]
+        E2 --> SR[類似検索]
+        SR --> RC[関連チャンク]
+        RC --> PR[プロンプト<br/>クエリ + 文脈]
+        Q -.-> PR
+        PR --> LLM[LLM]
+        LLM --> ANS[回答]
+    end
+
+    VS -. 検索対象 .-> SR
+```
+
+これ以降の各節は、このパイプラインのどこかを担う技術の話です。
+チャンク分割や埋め込みは Indexing、BM25・ハイブリッド検索・リランキングは Retrieval、コンテキストの並び順は Generation に対応します。
 
 ## チャンク分割
 

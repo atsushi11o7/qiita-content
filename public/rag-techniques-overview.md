@@ -737,17 +737,52 @@ Self-RAG も、能動的な RAG の一手法です。
 
 ## 評価の基礎
 
-<!-- メモ:
-- ※今回はラベル（qrels）を作っていないので実測結果は載せず、「こういう指標・方法がある」の紹介に留める
-- 検索の指標：Recall@k / MRR@k / nDCG@k（metrics.py に実装あり、binary relevance）。正解ラベル qrels.jsonl（query と positive_doc_ids）が要る、と説明
-- 生成の評価：Faithfulness（根拠との整合）/ Answer Relevance。RAGAS 等で LLM-as-Judge できる（今回は未実施、次のステップ）
-- コード：metrics.py の 3 関数を「こう書ける」程度に短く
--->
+手法を変えたときに「良くなったか」を測るには、評価指標が必要です。
+めんどくさかったので、正解ラベルを用意しておらず実測まではしていませんが、どんな指標・方法があるかを整理しておきます。
+
+### 検索の評価
+
+検索の評価には、次のような指標があります。
+
+```text
+Recall@k : 上位 k 件に正解文書がどれだけ含まれるか（再現率）
+MRR@k    : 最初に正解が現れた順位の逆数（Mean Reciprocal Rank）
+nDCG@k   : 正解の出現順位に対数で減衰をかけて正規化（Normalized DCG）
+```
+
+```python
+# src/rag/metrics.py
+def recall_at_k(ranked, relevant, k):
+    hits = sum(1 for d in ranked[:k] if d in relevant)
+    return hits / len(relevant) if relevant else 0.0
+
+def mrr_at_k(ranked, relevant, k):
+    for i, d in enumerate(ranked[:k]):
+        if d in relevant:
+            return 1.0 / (i + 1)
+    return 0.0
+
+def ndcg_at_k(ranked, relevant, k):
+    dcg = sum(1.0 / math.log2(i + 2) for i, d in enumerate(ranked[:k]) if d in relevant)
+    ideal = sum(1.0 / math.log2(i + 2) for i in range(min(len(relevant), k)))
+    return dcg / ideal if ideal else 0.0
+```
+
+### 生成の評価
+
+生成の評価は検索より難しく、主に次の観点があります。
+
+- **Faithfulness**：回答が検索文書に基づいているか（ハルシネーションの検出）
+- **Answer Relevance**：回答が質問に答えているか
+
+[RAGAS](https://docs.ragas.io/) などのフレームワークを使うと、LLM-as-Judge でこれらを自動評価できます。
 
 ## おわりに
 
-<!-- メモ:
-- Dense → BM25 → ハイブリッド → リランク → クエリ変換 → 親子チャンク → 能動的検索（CRAG）と積み上げ、各手法がパイプラインのどこを担い何を改善するかが整理できた
-- 発展（Contextual Retrieval・GraphRAG・Self-RAG の精緻化・セマンティックキャッシュ・評価ラベル作成による実測）は別記事で
-- 実装リポジトリ（rag-sandbox）へのリンクを追記
--->
+Dense 検索から始めて、BM25・ハイブリッド・リランキングと積み上げ、HyDE やマルチクエリでクエリを変換し、親子チャンクで文脈の粒度を変え、最後に Corrective RAG で能動的な検索ループまで実装しました。
+一通り手を動かしてみると、各手法が「パイプラインのどこを担い、何をしようとしているのか」が整理できました。
+
+今後は、Contextual Retrieval や GraphRAGなど、発展的な内容を試してみたいなと思っています。
+
+なお、この記事に載せたコードはあくまで抜粋です。
+動く実装の全体は リポジトリにあるので、よければそちらも覗いてみてください。

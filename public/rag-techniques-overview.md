@@ -136,6 +136,13 @@ llm = ChatOllama(model="qwen2.5:7b", base_url=host) if host else ChatOllama(mode
 | `fugashi` + `unidic-lite` | 日本語の形態素解析（BM25 のトークナイザー） |
 | `rank-bm25` | BM25 スコアリング |
 
+### 検索器の共通インターフェース（BaseRetriever）
+
+この記事に出てくる検索器（Dense / BM25 / ハイブリッド / Reranker / HyDE など）は、すべて LangChain の `BaseRetriever` を継承して作っています。
+実装するのは `_get_relevant_documents(self, query, *, run_manager)` メソッドで、呼び出し側は公開 API の `.invoke(query)` を使います（内部で `_get_relevant_documents` が呼ばれます）。
+
+このおかげで、どの検索手法も同じ `invoke()` で扱え、Reranker や HyDE のように「別の検索器をラップする」形でも自由に組み合わせられます。
+
 ## コーパスの準備（Qiita 公開 API）
 
 検索対象のコーパスには、自分の Qiita 記事を使いました。
@@ -402,20 +409,80 @@ results = hybrid.invoke("uv の利点は？")
 
 ## リランキング（Cross-Encoder / 日本語 Reranker）
 
-<!-- メモ:
-- 一次検索で多めに取得 → Cross-Encoder で精密に再採点。Bi-Encoder（embed 同士の内積、高速）vs Cross-Encoder（クエリ+文書を同時入力しスコア、高精度・低速）
-- モデル：cl-nagoya/ruri-reranker-large。BaseDocumentCompressor 継承 → ContextualCompressionRetriever でラップ（RerankedRetriever）
-- コード：rerank.py CrossEncoderReranker.compress_documents / reranked.py。hybrid → rerank の組み合わせ例
--->
+リランキングは、一次検索で取った候補を、より精度の高いモデルでスコア付けし直す手法です。
+
+埋め込み（Bi-Encoder）はクエリと文書を別々にベクトル化して内積を取りますが、Cross-Encoder はクエリと文書をまとめて入力し、関連度スコアを 1 つ出力します。
+計算コストは高いぶん精度が高いので、一次検索で候補を絞ったあとの並べ替えに向いています。
+
+```text
+Bi-Encoder:    embed(query) · embed(doc)     → 大量の文書に高速
+Cross-Encoder: score(query, doc) を直接推定   → 候補の絞り込みに使う
+```
+
+日本語向けの Reranker として `cl-nagoya/ruri-reranker-large` を使いました。
+
+```python
+# src/rag/rerank.py（抜粋）
+from sentence_transformers import CrossEncoder
+from langchain_core.documents.compressor import BaseDocumentCompressor
+
+class CrossEncoderReranker(BaseDocumentCompressor):
+    model_name: str = "cl-nagoya/ruri-reranker-large"
+    top_n: int = 5
+    _model: CrossEncoder = PrivateAttr()
+
+    @model_validator(mode="after")
+    def _init_model(self):
+        self._model = CrossEncoder(self.model_name)
+        return self
+
+    def compress_documents(self, documents, query, callbacks=None):
+        pairs = [(query, d.page_content) for d in documents]
+        scores = self._model.predict(pairs)
+        ranked = sorted(zip(documents, scores), key=lambda x: x[1], reverse=True)
+        return [d for d, _ in ranked[: self.top_n]]
+```
+
+`BaseDocumentCompressor` を継承しておくと、LangChain の `ContextualCompressionRetriever` に組み込めます。
+これを利用して、ハイブリッド検索の上に Reranker を重ねられます。
+
+```python
+# 使い方（hybrid → rerank）
+retriever = RerankedRetriever(
+    base_retriever=hybrid,
+    reranker=CrossEncoderReranker(top_n=5),
+)
+```
 
 ## メタデータフィルタリング
 
-<!-- メモ:
-- サイドカー JSON のタグ/日付を Document.metadata に載せ、検索後にフィルタ（FAISS 単体はフィルタが弱いので事後フィルタ）
-- 実装：TagFilteredRetriever（タグ OR 条件）。順番が重要：Hybrid(50) → Tag filter → Rerank(5)。Rerank の後に置くと上位 5 件にタグ一致が無いと空になる
-- 注：サイドカー無し（タグ無し）文書は除外される副作用。事後フィルタなので候補を多めに取るのが前提
-- コード：filtered.py
--->
+コーパス読み込み時にサイドカー JSON から付けたタグや日付（`Document.metadata`）を使うと、検索対象を絞り込めます。
+「特定のタグの記事だけ」「最近の記事だけ」といった絞り込みです。
+
+FAISS 単体はメタデータでのフィルタが弱いため、検索した候補を後から絞る**事後フィルタ**として実装しました。
+
+```python
+# src/rag/retrievers/filtered.py
+class TagFilteredRetriever(BaseRetriever):
+    base_retriever: BaseRetriever
+    tags: list[str]     # OR 条件：いずれかのタグを含む文書を残す
+
+    def _get_relevant_documents(self, query, *, run_manager):
+        tag_set = set(self.tags)
+        candidates = self.base_retriever.invoke(query)
+        return [d for d in candidates if tag_set & set(d.metadata.get("tags", []))]
+```
+
+事後フィルタなので、**挟む位置**が重要です。
+`Hybrid（50 件）→ Tag filter → Rerank（5 件）` の順にすると、タグ一致した文書の中から Reranker が上位を選びます。
+逆に Rerank の後にフィルタを置くと、上位 5 件にタグ一致が無ければ結果が空になってしまいます。
+
+```python
+filtered = TagFilteredRetriever(base_retriever=hybrid, tags=["Python", "uv"])
+retriever = RerankedRetriever(base_retriever=filtered, reranker=CrossEncoderReranker(top_n=5))
+```
+
+候補を多めに取ってから絞るのが前提です（タグが付いていない文書は除外される点にも注意）。
 
 ## クエリ変換（HyDE・マルチクエリ・分解）
 
@@ -435,12 +502,21 @@ results = hybrid.invoke("uv の利点は？")
 - コード：parent_child.py build_parent_child_retriever
 -->
 
-## 検索結果の調整（MMR・コンテキスト並び順）
+## 検索結果の調整（MMR）
 
 <!-- メモ:
 - MMR（Maximal Marginal Relevance）：関連度と多様性のバランス（似た文書ばかりを防ぐ）。FAISS as_retriever(search_type="mmr", lambda_mult, fetch_k)。0.0=多様性 / 1.0=関連性。dense.py の mmr オプションとして実装
-- Lost-in-the-Middle：長文脈の中間は無視されやすい → 重要文書を先頭/末尾へ。LangChain LongContextReorder を生成前に適用（generation.py の reorder フラグ）。LCEL チェーンの外で並べ替える点に注意
-- コード：dense.py（mmr）/ generation.py（LongContextReorder ＋ 出典番号付与 _format_doc）
+- コード：dense.py（mmr）
+-->
+
+## 生成（Generation）
+
+<!-- メモ:
+- RAGGenerator（generation.py）：取得した文書をプロンプトに入れて LLM で回答生成
+- 文脈整形：_format_doc で各文書に「[1] source: タイトル」と出典番号を付ける（回答に出典を含めやすくなる）
+- ハルシネーション抑制：システムプロンプトに「与えられた文書に根拠がなければ推測せず、分からないと答えて」
+- lost-in-the-middle 対策：LongContextReorder で重要文書を先頭/末尾へ寄せる（reorder フラグ）。LCEL チェーンの外で並べ替えてから context を組み立てる点に注意
+- コード：generation.py（RAGGenerator.generate / _format_doc / LongContextReorder）
 -->
 
 ## 能動的な検索（Agentic RAG / Corrective RAG）

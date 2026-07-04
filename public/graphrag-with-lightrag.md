@@ -7,11 +7,13 @@ tags:
   - GraphRAG
   - LightRAG
 private: false
-updated_at: '2026-06-27T19:58:06+09:00'
+updated_at: '2026-07-04T16:11:54+09:00'
 id: a7269731cdef46c87434
 organization_url_name: null
 slide: false
 ignorePublish: false
+posting_campaign_uuid: null
+agreed_posting_campaign_term: false
 ---
 
 ## はじめに

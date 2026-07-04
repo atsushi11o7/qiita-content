@@ -16,53 +16,369 @@ ignorePublish: false
 
 ## はじめに
 
-<!-- メモ: LangChain で RAG を組み、自作 Retriever/Reranker を書くと Pydantic のルールに必ずぶつかる(self._model = ... が素通りしない等)。Pydantic 自体は RAG 専用ではなく FastAPI などでも使う汎用ライブラリ。本記事は rag-sandbox の実装から、LangChain で必須になる Pydantic の要素を「作る側」「受ける側」の二軸で整理する。前作(RAG 基礎 / GraphRAG)の続きの実装ノート。問題→解決の煽りは避けフラットに。 -->
+LangChain で RAG を組んでいると、Pydantic を使うことになります。
+自作の Retriever や Reranker、あるいは LLM に構造化データを返させるスキーマは、Pydantic の `BaseModel`(を継承したクラス)として書きます。
+
+正直なところ、これまでは Pydantic を「なんとなく型の安全を守ってくれるもの」として、利点をしっかり理解しないまま使っていた面がありました。
+
+そこで今回は、LangChain で必須になる Pydantic の要素を改めて整理してみます。
+自作コンポーネントを Pydantic モデルとして書く「作る側」と、LLM の出力を Pydantic で受け取る「受ける側」の二軸で見ていきます。
 
 ## Pydantic とは
 
-<!-- メモ: 型ヒントを使ったデータ検証・パースの汎用ライブラリ。RAG/LangChain は一利用先にすぎない。用途(FastAPI のリクエスト/レスポンス検証、pydantic-settings の設定管理、LLM の構造化出力スキーマ、SQLModel など)。v2 はコア(pydantic-core)が Rust 実装で高速。BaseModel にフィールドを型付きで宣言 → インスタンス化時に検証、という基本だけ先に示す。深掘りは後続セクション。 -->
+Pydantic は、型ヒントを使ってデータを検証・変換する Python のライブラリです。
+`BaseModel` を継承したクラスにフィールドを型付きで宣言すると、インスタンス化のときに値が型どおりかを検証してくれます。
+
+```python
+from pydantic import BaseModel
+
+class Config(BaseModel):
+    model_name: str
+    top_n: int = 5
+
+Config(model_name="ruri", top_n=3)      # OK
+Config(model_name="ruri", top_n="abc")  # ValidationError（top_n が int でない）
+```
+
+RAG や LangChain に限らず、幅広い場面で使われています。
+
+- **FastAPI** — リクエスト/レスポンスの検証・シリアライズが Pydantic ベース
+- **pydantic-settings** — 環境変数や設定ファイルを型付きで読み込む
+- **LLM 周り** — OpenAI SDK の構造化出力や、LangChain のスキーマ定義
+- **SQLModel** — DB のモデル定義(SQLAlchemy + Pydantic)
+
+現在の主流は v2 で、コア部分(`pydantic-core`)が Rust で実装されていて高速です。
+本記事のコードもすべて v2 を前提にしています。
 
 ## なぜ LangChain で Pydantic が出てくるのか
 
-<!-- メモ: LangChain の中核クラス(BaseRetriever・BaseDocumentCompressor・Runnable 系)が Pydantic モデルとして作られている。だから自作サブクラスでも Pydantic のルール(フィールド宣言・検証)に従う必要があり、__init__ で self._model = ... と書くと素通りしない/怒られる。対比として Embeddings は素の ABC なので PrefixedEmbeddings は普通の __init__ + self._model でよい(embeddings.py 実例)。「基底クラスが Pydantic モデルか素の ABC か」で書き方が変わる、が背骨。 -->
+理由はシンプルで、一部の中核的な抽象クラスが Pydantic モデルだからです。
+たとえば `BaseRetriever` や `BaseDocumentCompressor` は、Pydantic の `BaseModel` を継承しています(`BaseRetriever` は `RunnableSerializable` 経由)。
+これらを継承して自作コンポーネントを書くと、自動的に Pydantic のルール(フィールドは型付きで宣言する、インスタンス化時に検証される)に従うことになります。
 
-## 押さえておきたい Pydantic の要素
+Pydantic が使われる理由は一つではありません。
+LLM 出力の構造化だけでなく、コンポーネントの設定値の検証・シリアライズ・スキーマ化や、`Runnable` との統合にも Pydantic の機能が活きています。
 
-<!-- メモ: この親直下は導入のみ(自作コンポーネントを Pydantic モデルとして書くときに必要な要素を 4 つ、### で)。 -->
+ここで引っかかりやすいのが、`__init__` の中で `self._model = SomeModel()` のように属性を代入する書き方です。
+素の Python クラスなら普通ですが、Pydantic モデルでは通常、宣言していない属性をそのまま持たせられないため、この書き方は通りません。
+だから後述の `PrivateAttr` や `model_validator` が必要になります。
+
+一方で、LangChain のすべてが Pydantic モデルというわけではありません。
+たとえば埋め込みの基底クラス `Embeddings` は素の抽象基底クラス(ABC)なので、普通の `__init__` で属性を持たせられます。
+
+以下は `Embeddings` を継承した自作クラスの例です。`self._model` を普通に代入できています。
+
+```python
+from langchain_core.embeddings import Embeddings
+from sentence_transformers import SentenceTransformer
+
+
+class PrefixedEmbeddings(Embeddings):
+    def __init__(
+        self,
+        model_name: str = "cl-nagoya/ruri-v3-310m",
+        query_prefix: str = "検索クエリ: ",
+        doc_prefix: str = "検索文書: ",
+        batch_size: int = 64,
+    ) -> None:
+        self._model = SentenceTransformer(model_name)  # 普通に代入できる
+        self._query_prefix = query_prefix
+        self._doc_prefix = doc_prefix
+        self._batch_size = batch_size
+```
+
+つまり、LangChain で自作コンポーネントを書くときは、まず継承元が Pydantic モデルかどうかを確認する必要があります。
+`BaseRetriever` や `BaseDocumentCompressor` のような Pydantic モデルを継承するときだけ、次に紹介する Pydantic の作法が必要になります。
+
+## 自作コンポーネントで押さえておきたい Pydantic の要素
+
+Pydantic には多くの機能がありますが、ここでは LangChain の自作コンポーネントを Pydantic モデルとして実装するときによく使う要素を 4 つ見ていきます。
+順に「フィールド」「`arbitrary_types_allowed`」「`PrivateAttr`」「`model_validator`」です。
 
 ### フィールドと BaseModel の基礎
 
-<!-- メモ: BaseModel を継承し型付きフィールドを宣言 → インスタンス化時に検証。model_name: str = "..."、top_n: int = 5 のようにデフォルト付き。Field(default_factory=list) でミュータブル既定値、Field(description=...) で説明(構造化出力で LLM への指示にもなる)、制約(gt/min_length 等)。v2 前提。最小限に。 -->
+`BaseModel` を継承したクラスでは、クラス変数のように型付きでフィールドを宣言します。
+宣言したフィールドはインスタンス化のときに型が検証され、デフォルト値も設定できます。
+
+```python
+from pydantic import BaseModel
+
+class RerankConfig(BaseModel):
+    model_name: str      # 必須。型は str
+    top_n: int = 5       # デフォルト付き
+```
+
+もう少し細かく指定したいときは `Field` を使います。
+
+```python
+from pydantic import BaseModel, Field
+
+class RerankConfig(BaseModel):
+    model_name: str = Field(description="使用する Cross-Encoder のモデル名")
+    top_n: int = Field(default=5, ge=1)                    # 1 以上に制約
+    extra_models: list[str] = Field(default_factory=list)  # 可変な既定値
+```
+
+ポイントは 3 つです。
+
+- `Field(description=...)` — フィールドの説明。後半の構造化出力では、この説明が JSON Schema 経由で LLM への指示にもなります
+- `Field(ge=1)` などの制約 — 値の範囲や長さを検証できます(`ge` / `gt` / `min_length` など)
+- `Field(default_factory=list)` — リストや辞書のような値を既定値にするときに使います(呼び出しごとに新しいインスタンスが作られます)
+
+自作コンポーネントの「設定値」(モデル名や件数など)は、こうしたフィールドとして宣言していきます。
 
 ### arbitrary_types_allowed
 
-<!-- メモ: FAISS・CrossEncoder・numpy など Pydantic が検証方法を知らない型をフィールドに持ちたいとき、model_config = {"arbitrary_types_allowed": True} で許可する。RerankedRetriever が base_retriever: BaseRetriever / reranker: CrossEncoderReranker を持つ例。ConfigDict の書き方にも軽く触れる。 -->
+Pydantic は、宣言したフィールドの型を検証するためのスキーマを内部で生成します。
+ところが `CrossEncoder` や `FAISS`、`numpy` 配列のような外部ライブラリの型は、Pydantic が検証方法を知らないため、フィールドに宣言するとスキーマ生成に失敗します。
+
+```python
+from pydantic import BaseModel
+from sentence_transformers import CrossEncoder
+
+class Reranker(BaseModel):
+    encoder: CrossEncoder   # これだけだとエラー
+
+# pydantic.errors.PydanticSchemaGenerationError:
+# Unable to generate pydantic-core schema for <class 'CrossEncoder'>
+```
+
+こういう「Pydantic が知らない型」を扱いたいときは、`model_config` で `arbitrary_types_allowed` を有効にします。
+すると Pydantic はその型について独自のスキーマ生成を行わず、`isinstance` による基本的な型チェックだけで扱います。
+
+```python
+class Reranker(BaseModel):
+    model_config = {"arbitrary_types_allowed": True}
+
+    encoder: CrossEncoder   # これで宣言できる
+```
+
+たとえば別の Retriever と Reranker をフィールドに持つ `RerankedRetriever` では、この設定を付けます。
+
+```python
+class RerankedRetriever(BaseRetriever):
+    base_retriever: BaseRetriever
+    reranker: CrossEncoderReranker
+
+    model_config = {"arbitrary_types_allowed": True}
+```
+
+`model_config` は辞書のほか、補完の効く `ConfigDict` でも書けます(中身は同じです)。
+
+```python
+from pydantic import ConfigDict
+
+class Reranker(BaseModel):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+```
 
 ### PrivateAttr
 
-<!-- メモ: 検証・シリアライズの対象にしたくない内部状態(重いモデルなど)を持つ。_model: CrossEncoder = PrivateAttr()。フィールド(公開・検証対象)と PrivateAttr(内部・アンダースコア始まり)の違い。Pydantic モデルでは __init__ で勝手に self._x = ... できないので PrivateAttr で宣言する、という理由。 -->
+フィールドは「外から渡す・検証する・シリアライズする」値のためのものです。
+一方で、`CrossEncoder` のような重いモデルは、検証もシリアライズもしたくない「内部で持っておくだけ」の状態です。
+こういう内部状態は、フィールドではなく `PrivateAttr` で宣言します。
+
+```python
+from pydantic import BaseModel, PrivateAttr
+from sentence_transformers import CrossEncoder
+
+class Reranker(BaseModel):
+    model_name: str = "cl-nagoya/ruri-reranker-large"   # フィールド（検証・シリアライズ対象）
+    _model: CrossEncoder = PrivateAttr()                # プライベート属性（対象外）
+```
+
+`PrivateAttr` で宣言した属性は、アンダースコア始まりの名前を持ち、Pydantic の検証やシリアライズの対象外です。
+`model_dump()` の出力にも出てきません。
+
+なぜフィールドではなくこれを使うのかというと、Pydantic モデルでは宣言していない属性に `self._model = ...` と代入できないからです。
+`PrivateAttr` で「あとで値を入れる内部属性」を宣言しておけば、初期化のなかで代入できるようになります。
+実際に値を入れるタイミングは、次の `model_validator` で扱います。
 
 ### model_validator(mode="after")
 
-<!-- メモ: __init__ を自前で書かずに、検証後の初期化フックでセットアップする。@model_validator(mode="after") def _init_model(self): self._model = CrossEncoder(self.model_name); return self。フィールド(model_name)が確定した後に走るので、それを使って重いモデルを遅延ロードできる。mode="before"/"after" の違いにも一言。 -->
+`PrivateAttr` で宣言した `_model` に、いつ値を入れるのかという問題が残ります。
+Pydantic モデルでは自前の `__init__` を書く代わりに、`model_validator(mode="after")` や `model_post_init` で初期化後の処理を書きます。
+
+```python
+from pydantic import BaseModel, PrivateAttr, model_validator
+from sentence_transformers import CrossEncoder
+
+class Reranker(BaseModel):
+    model_name: str = "cl-nagoya/ruri-reranker-large"
+    _model: CrossEncoder = PrivateAttr()
+
+    model_config = {"arbitrary_types_allowed": True}
+
+    @model_validator(mode="after")
+    def _init_model(self) -> "Reranker":
+        self._model = CrossEncoder(self.model_name)
+        return self
+```
+
+`mode="after"` を付けると、このメソッドはフィールドの検証が終わったあとに呼ばれます。
+そのため `self.model_name` はすでに確定していて、その値を使って重いモデルを遅延ロードできます。
+`mode="after"` のバリデータは検証後のモデルを受け取るので、最後に `self` を返すのが約束事です。
+
+ちなみに、検証の前に生の入力(辞書)を受け取る `mode="before"` もありますが、今回のようにフィールド確定後のセットアップには `mode="after"` を使います。
+
+なお、単に初期化後の処理をしたいだけなら、`model_post_init` を使う手もあります。
+
+```python
+from typing import Any
+
+class Reranker(BaseModel):
+    model_name: str = "cl-nagoya/ruri-reranker-large"
+    _model: CrossEncoder = PrivateAttr()
+    model_config = {"arbitrary_types_allowed": True}
+
+    def model_post_init(self, __context: Any) -> None:
+        self._model = CrossEncoder(self.model_name)
+```
+
+`model_validator(mode="after")` は、初期化に加えて値同士の整合性チェックまでやりたいときに向いています。
 
 ## 実例: 自作 Reranker と Retriever
 
-<!-- メモ: CrossEncoderReranker(rerank.py)全体を提示 = BaseDocumentCompressor 継承 + model_name/top_n フィールド + _model PrivateAttr + arbitrary_types_allowed + model_validator(mode=after) + compress_documents。続けて RerankedRetriever(reranked.py)= BaseRetriever 継承 + arbitrary_types_allowed + _get_relevant_documents。最後に「どの要素がどの問題を解くか」の対応表(フィールド=検証したい設定値 / arbitrary_types_allowed=未知の型を持つ / PrivateAttr=検証したくない内部状態 / model_validator=初期化後セットアップ)。 -->
+ここまでの要素を組み合わせると、自作コンポーネントが書けます。
+まず、`CrossEncoder` でドキュメントを再ランク付けする Reranker です。
+`BaseDocumentCompressor`(Pydantic モデル)を継承し、フィールド・`arbitrary_types_allowed`・`PrivateAttr` を使っています。
+初期化はモデルをロードするだけなので、`model_validator` ではなく `model_post_init` にしました。
+
+```python
+from copy import copy
+from collections.abc import Sequence
+from typing import Any
+
+from langchain_core.callbacks.manager import Callbacks
+from langchain_core.documents import Document
+from langchain_core.documents.compressor import BaseDocumentCompressor
+from pydantic import PrivateAttr
+from sentence_transformers import CrossEncoder
+
+
+class CrossEncoderReranker(BaseDocumentCompressor):
+    model_name: str = "cl-nagoya/ruri-reranker-large"   # フィールド
+    top_n: int = 5                                      # フィールド
+    _model: CrossEncoder = PrivateAttr()                # 内部状態
+
+    model_config = {"arbitrary_types_allowed": True}    # CrossEncoder を許可
+
+    def model_post_init(self, __context: Any) -> None:
+        self._model = CrossEncoder(self.model_name)     # 遅延ロード
+
+    def compress_documents(
+        self,
+        documents: Sequence[Document],
+        query: str,
+        callbacks: Callbacks | None = None,
+    ) -> Sequence[Document]:
+        if not documents:
+            return []
+        pairs = [(query, doc.page_content) for doc in documents]
+        scores = self._model.predict(pairs)
+        ranked = sorted(zip(documents, scores, strict=True), key=lambda x: x[1], reverse=True)
+        results = []
+        for doc, score in ranked[: self.top_n]:
+            new_doc = copy(doc)
+            new_doc.metadata = {**doc.metadata, "rerank_score": float(score)}
+            results.append(new_doc)
+        return results
+```
+
+そして、この Reranker を任意の Retriever と組み合わせるラッパーです。
+`BaseRetriever`(Pydantic モデル)を継承し、フィールドに別の Retriever と Reranker を持ちます。
+
+```python
+from langchain_core.callbacks.manager import CallbackManagerForRetrieverRun
+from langchain_core.documents import Document
+from langchain_core.retrievers import BaseRetriever
+
+
+class RerankedRetriever(BaseRetriever):
+    base_retriever: BaseRetriever
+    reranker: CrossEncoderReranker
+
+    model_config = {"arbitrary_types_allowed": True}
+
+    def _get_relevant_documents(
+        self,
+        query: str,
+        *,
+        run_manager: CallbackManagerForRetrieverRun,
+    ) -> list[Document]:
+        candidates = self.base_retriever.invoke(query)
+        return self.reranker.compress_documents(candidates, query)
+```
+
+要素と役割の対応は次のとおりです。
+
+| 要素 | 役割 |
+| --- | --- |
+| フィールド(`model_name` / `top_n`) | 外から渡す設定値。型が検証される |
+| `arbitrary_types_allowed` | `CrossEncoder` など Pydantic が知らない型を扱えるようにする |
+| `PrivateAttr`(`_model`) | 検証・シリアライズしたくない内部状態(重いモデル)を持つ |
+| `model_post_init`(または `model_validator`) | フィールド確定後に `_model` をロードする |
 
 ## LLM の構造化出力を Pydantic で受け取る
 
-<!-- メモ: 受ける側の軸。rag-sandbox は実際には StrOutputParser + 正規表現/startswith("relevant") で受けていた(multi_query.py の _BULLET_RE、corrective_rag.py の grade)。動くが壊れやすい(表記ゆれ・前置きで判定崩れ)。改善例として Pydantic スキーマ + llm.with_structured_output(Schema) を提示(例: class GradeDocuments(BaseModel): relevant: bool = Field(description=...))。これは実コードではなく「こう書けば堅い」改善例だと明示する。description が LLM への指示になる点。作る側(前半)と受ける側(ここ)が Pydantic の二大用途、とまとめる。 -->
+ここまでは「作る側」、つまり自作コンポーネントを Pydantic モデルとして書く話でした。
+もう一つの大きな用途が「受ける側」、LLM の出力を Pydantic で受け取ることです。
 
-## Pydantic v1 / v2 と LangChain の注意点
+たとえば「この文書は質問に関連しているか」を LLM に判定させる場面を考えます。
+手軽に済ませるなら、文字列で受け取って判定する書き方です。
 
-<!-- メモ: Pydantic は v1→v2 で破壊的変更(@validator→field_validator、@root_validator→model_validator、.dict()→model_dump()、class Config→model_config/ConfigDict)。LangChain は昔 v1 を内部使用し langchain_core.pydantic_v1 シムを公開していたが、langchain-core 0.3(2024/9)で v2 ネイティブへ移行。今は素の pydantic(v2)でよい。古い記事の langchain_core.pydantic_v1 や @validator は v1 時代の名残なので注意。短め。 -->
+```python
+from langchain_core.output_parsers import StrOutputParser
+
+grade_chain = prompt | llm | StrOutputParser()
+raw = grade_chain.invoke({"question": question, "document": doc}).strip().lower()
+
+if raw.startswith("relevant"):
+    # 関連あり
+    ...
+```
+
+これは動きますが、壊れやすい書き方です。
+LLM が `relevant` とだけ返す保証はなく、「関連しています」「Relevant: yes」などと返された瞬間に判定が崩れます。
+
+ここで Pydantic のスキーマと `with_structured_output` を使うと、出力を型で受け取れます。
+
+```python
+from pydantic import BaseModel, Field
+
+class GradeDocuments(BaseModel):
+    relevant: bool = Field(description="文書が質問に関連していれば true、そうでなければ false")
+
+structured_llm = llm.with_structured_output(GradeDocuments)
+result = structured_llm.invoke(prompt)   # 返り値は GradeDocuments
+
+if result.relevant:
+    # 関連あり
+    ...
+```
+
+`with_structured_output(GradeDocuments)` は、スキーマを LLM に渡して「この形で返して」と指示し、返ってきた出力を `GradeDocuments` として検証してくれます。
+`result.relevant` は必ず `bool` なので、文字列判定のような崩れ方をしません。
+このとき `Field(description=...)` の説明は、生成される JSON Schema に含まれて LLM への指示として使われるので、前半で触れた `description` がここで効いてきます。
+
+ちなみにこの「受ける側」では、前半で出てきた `arbitrary_types_allowed` や `PrivateAttr` は出番がありません。
+スキーマは、検証・シリアライズされるフィールドだけで完結するからです。
+
+なお `with_structured_output` は、function calling / structured output に対応したモデルで使えます。
 
 ## おわりに
 
-<!-- メモ: 要素の対応まとめ(作る側の 4 要素 + 受ける側の構造化出力)。基底クラスが Pydantic モデルか素の ABC かを見分けるのが第一歩。Pydantic は汎用なので LangChain 以外(FastAPI 等)でも同じ知識が効く。 -->
+LangChain で RAG を組むときに出てくる Pydantic の要素を整理しました。
+「作る側」では、自作コンポーネントを Pydantic モデルとして書くために、フィールド・`arbitrary_types_allowed`・`PrivateAttr`・`model_validator` を使いました。
+「受ける側」では、LLM の出力を Pydantic スキーマで受け取り、文字列判定より堅く扱えることを見ました。
+
+調べていて思ったことですが、Pydantic は本格的に Python を扱うなら知っておくべき基礎ライブラリかもしれないですね。
+自分は LangChain で初めて Pydantic に触れましたが、調べれば調べるほど、LangChain に限らず広く押さえておきたいライブラリだと感じます。
 
 ## 参考
 
-<!-- メモ: Pydantic 公式ドキュメント(models / PrivateAttr / validators / ConfigDict)、LangChain の custom retriever ドキュメント、with_structured_output のドキュメント。実在確認してから貼る。 -->
+- [Pydantic - Models](https://docs.pydantic.dev/latest/concepts/models/)
+- [Pydantic - Fields](https://docs.pydantic.dev/latest/concepts/fields/)
+- [Pydantic - Validators](https://docs.pydantic.dev/latest/concepts/validators/)
+- [LangChain - How to return structured data from a model](https://python.langchain.com/docs/how_to/structured_output/)
 

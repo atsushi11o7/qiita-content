@@ -31,8 +31,6 @@ ignorePublish: false
 読み方としては、各段階はそれぞれ独立して読めます。
 最後の「設計の実践」で、それまでに用意した部品を組み合わせて、実際のサービスを設計してみます。
 
-なお、この整理は私のうろ覚えの知識と Claude Code と対話した結果を元に進めたので、ベストプラクティスと言い切れない箇所があるかもしれないことを述べておきます。
-
 ## サービス開発をどう考え、どう設計するか
 
 サービスは、2 つの軸で捉えると見通しがよくなります。
@@ -744,7 +742,6 @@ def compression_ratio(text):                   # 圧縮後/前。繰り返しの
 
 ## 最後に、組み合わせて設計する
 
-ここが山場です。
 これまでにそろえた段階の道具と、最初に示した設計の型を、実際のサービスに当てはめてみます。
 以下の 3 つのケースで、考え方と実装を追います。
 
@@ -762,25 +759,336 @@ def compression_ratio(text):                   # 圧縮後/前。繰り返しの
 
 ### ケーススタディ: URL 短縮（設計書形式で型を一巡）
 
-<!-- メモ: 長い URL を短いコードにし、コードへのアクセスを元 URL へ転送。型の6見出しで一気に設計。①要件(短縮/解決/計測、認証・独自ドメイン・管理UIはやらない、解決〔読み〕>>発行〔書き〕なので解決経路が主戦場、発行コードは常に同じ URL へ=強い一貫性、クリック数はずれてよい)②機能(発行/解決〔中心〕/計測、名詞=コードと元URLの対応、中心=発行→解決)③データ設計(url_mapping(code PK,long_url,created_at,click_count)、肝はコードの作り方=連番ID を base62〔6文字で約568億通り〕、連番は衝突しない・短い・確定的、トレードオフ=隣を推測されやすい→秘匿要るなら乱数+衝突チェック、別解=URL ハッシュ、公開URLなので連番で十分)④構成(POST /api/urls 発行 201/GET /{code} 解決 302、パス衝突注意=catch-all /{code} と管理APIを /api/ 配下に分ける定石、前段の部品〔キャッシュ・ルータ・レート制限〕を import して配線)⑤スケール(解決経路にキャッシュ、コードでシャーディング〔コンシステントハッシュ〕、発行にレート制限、採番の分散=ノードごとに ID レンジ)⑥運用(クリック数/発行数/解決404率、クリックは非同期集計の判断も)。【図: URL短縮アーキ flowchart Client→Router→レート制限/キャッシュ→Service→DB】。実装: encode_base62/ShortenerService/UrlShortenerApp(部品の配線)。 -->
+長い URL を短いコードに変換し、そのコードへのアクセスを元 URL へ転送するサービスです。
+型の 6 ステップの見出しで、最初から一気に設計してみます。
+
+**① 要件確認 — 何を作るかを固める**
+
+- 目的：長い URL を短いコードに変換し、その短縮 URL へのアクセスを元 URL へ自動転送する。
+- やること：短縮コードの発行 / 元 URL への解決(リダイレクト)/ アクセス数の計測。
+- やらないこと：ユーザー認証・独自ドメイン・管理 UI。最初に線を引いておく。
+- 利用者と規模感：不特定多数が短縮 URL を踏む。解決(読み取り)が発行(書き込み)より圧倒的に多く、一度作った短縮 URL が何万回もアクセスされうる。だから最適化の主戦場は解決経路。
+- 一貫性・制約：発行したコードは常に同じ元 URL へ解決されないと困る(強い一貫性)。一方クリック数は多少ずれても実害は小さい(後で緩められる)。
+
+**② 機能洗い出し — 要件を「できること」に分解する**
+
+- 短縮 URL の発行：長い URL を渡すと、短いコード(例 `b7Fk`)を返す。
+- 短縮 URL の解決(リダイレクト)：短いコードでアクセスされたら、対応する元 URL を引いてそこへ転送する。最も呼ばれる中心機能。
+- アクセス数の計測：各短縮 URL が何回踏まれたかを数える(あると嬉しい)。
+- 名詞はコードと元 URL の対応、動詞は発行する / 解決する / 数える。中心の 1 機能として、まず「発行 → 解決」が動く最小の形を作る。
+
+**③ データ設計 — どう持つか**
+
+- 中心はごく単純な対応関係「コード → 元 URL」。テーブルは 1 つで足ります：`url_mapping(code〔主キー〕, long_url, created_at, click_count)`。
+- 設計の肝はコードの作り方です。ここでは「連番の整数 ID を base62(0-9a-zA-Z の 62 種)で文字列化」します。連番なので衝突しない・短い(6 文字で約 568 億通り)・確定的。
+- トレードオフ：連番は隣のコードを推測されやすい。秘匿が要るなら乱数コード + 衝突チェック。別解として元 URL をハッシュすると「同じ URL は同じコードに集約」できますが衝突対策が要ります。今回は公開 URL で推測されても実害が小さいので、連番で十分と判断。
+
+**④ 構成 — どう動かすか**
+
+- エンドポイントは 2 つ：`POST /api/urls`(発行、成功で 201 + コード)/ `GET /{code}`(解決、元 URL へ 302 リダイレクト。最も呼ばれる読み経路)。
+- パスの衝突に注意：解決は root 直下の catch-all `/{code}`。管理 API を `/urls` に置くと `/urls` が「code = "urls"」と誤解されて衝突します。そこで管理 API は `/api/` 配下に分け、root の 1 階層を短縮コード専用に空けます(この種のサービスの定石)。
+- 前段までに作った部品(キャッシュ・最小ルータ・レート制限)を、実際に import して配線します。
+
+```mermaid
+flowchart TB
+    Client["クライアント"]
+    Client -->|"POST /api/urls（発行）"| R[Router]
+    Client -->|"GET /{code}（解決）"| R
+    R -->|発行| L["レート制限<br/>TokenBucketLimiter"]
+    L --> SV["ShortenerService<br/>base62で採番"]
+    R -->|解決| CA["SimpleCache<br/>Cache-Aside"]
+    CA -. ミス .-> SV
+    SV --> DB[("code → 元URL")]
+```
+
+```python
+import string
+ALPHABET = string.digits + string.ascii_lowercase + string.ascii_uppercase  # 62文字
+def encode_base62(n):                          # 連番ID → 短いコード（6文字で約568億通り）
+    if n == 0: return ALPHABET[0]
+    chars = []
+    while n > 0:
+        n, r = divmod(n, 62); chars.append(ALPHABET[r])
+    return "".join(reversed(chars))
+
+class ShortenerService:                        # ドメインの核（採番・保存・解決・計測）
+    def __init__(self, start_id=1):
+        self._next_id = start_id
+        self._url_by_code = {}                  # code -> 元URL（データ設計の中心）
+        self._clicks = {}                       # code -> クリック数
+    def shorten(self, long_url):                # 発行：連番を base62 でコード化して保存
+        code = encode_base62(self._next_id); self._next_id += 1
+        self._url_by_code[code] = long_url; self._clicks[code] = 0
+        return code
+    def lookup(self, code):                     # 解決：副作用なしの読み取り（キャッシュ対象）
+        return self._url_by_code.get(code)
+    def record_click(self, code):               # 計測：ヒットでも数えたいので読み取りと分離
+        if code in self._clicks: self._clicks[code] += 1
+    def clicks(self, code):
+        return self._clicks.get(code, 0)
+
+class UrlShortenerApp:                          # ドメイン核 + キャッシュ + ルータ + レート制限
+    def __init__(self, create_capacity=5, cache_ttl=60):
+        self.service = ShortenerService()
+        self.cache = SimpleCache(ttl_seconds=cache_ttl)                 # 解決経路のキャッシュ
+        self.limiter = TokenBucketLimiter(create_capacity, 1)          # 発行のレート制限
+        self.router = Router()
+        self.router.add("POST", "/api/urls", self._create)            # 管理APIは /api/ 配下
+        self.router.add("GET", "/{code}", self._redirect)             # catch-all リダイレクト
+
+    def _create(self, params, body):
+        if not self.limiter.allow(body.get("client", "anon")):
+            return (429, {"error": "rate limit exceeded"})            # 超過は 429
+        return (201, {"code": self.service.shorten(body["long_url"])})
+
+    def _redirect(self, params, body):
+        code = params["code"]
+        url = self.cache.get(code)                                    # Cache-Aside
+        if url is None:
+            url = self.service.lookup(code)
+            if url is None: return (404, {"error": "not found"})
+            self.cache.set(code, url)
+        self.service.record_click(code)                              # ヒットでも計測する
+        return (302, {"location": url})
+```
+
+**⑤ スケール対応 — 読みが多いので解決経路を優先**
+
+- キャッシュ：解決経路の前段に「コード → 元 URL」のキャッシュを置く。この対応は不変なのでキャッシュ向き。
+- シャーディング：コードをキーに複数ノードへ分散。再配置を抑えるためコンシステントハッシュ。
+- レート制限：発行 API を乱用から守る。
+- 採番の分散：単一の連番採番は書き込みの単一障害点になりうる。ノードごとに ID レンジを配って分散する(コードが完全な連番でなくなるのはトレードオフ)。
+
+**⑥ 運用監視 — 作って終わりにしない**
+
+- クリック数・発行数・解決の 404 率を計測。特定コードへの異常なアクセス集中や 404 の急増を検知して調整。
+- クリック数は書き込みが頻繁なので、即時 DB 反映ではなく非同期集計にする判断もある(正確さより負荷軽減)。
 
 ### ケーススタディ: 予約システム（ロードマップ形式）
 
-<!-- メモ: 会議室のようなリソースを時間帯で予約。希少資源=時間帯(区間)、核=処理・並行制御。まず型で設計(①要件=予約/キャンセル/一覧、課金通知やらない、同じリソースで時間帯が重なってはいけない=強い ②機能=予約〔中心〕/キャンセル/一覧 ③データ設計=Booking(id PK,resource_id,start,end)、1対多、不変条件=同じ resource_id で区間が重ならない、判定は処理の段の overlaps を再利用 ④構成=POST /bookings 201/重なれば 409 Conflict、DELETE 204、GET 一覧 ⑤スケール=全件走査 O(N) をやめ開始時刻ソートで隣接、並行制御はリソース単位にロック範囲を閉じる、本番は DB のトランザクション・制約へ ⑥運用=成功率/409率/キャンセル率)。作った道のり=まず単純(単一リソースの重なり判定=overlaps 再利用)→広げる(複数リソース+Booking+キャンセル)→本番へ(二重予約 check-then-act をプロセス内ロックで防止+API化 409)。実装: RoomCalendar→BookingService→SafeBookingService(book/cancel をロックで包むだけ=差分はロックのみ)→make_booking_api。20スレッドが同枠を狙っても成功1件のみ。限界=プロセス内ロックは複数台で破綻→次の EC へ。 -->
+会議室のようなリソースを、時間帯で予約するサービスです。
+希少な資源は時間帯(区間)で、核になるのは処理と並行制御です。
+まず型で設計を整理し、そのあと「一番単純な形から育てた道のり」を見せます。
+
+**型で設計**
+
+- **要件確認**：リソース(会議室など)を時間帯で予約し、重複を防ぐ。やること=予約・キャンセル・一覧、やらない=課金・通知。予約(書き)と確認(読み)が混在。一貫性=同じリソースで時間帯が重なってはいけない(強い)。
+- **機能洗い出し**：予約する(リソースと時間帯を指定し、既存と重ならなければ確保する。中心機能)/ キャンセルする(枠を空ける)/ 一覧を見る(あるリソースの予約を時刻順に)。
+- **データ設計**：`Booking(id〔主キー〕, resource_id, start, end)`。1 リソースが複数予約を持つ 1 対多。不変条件=同じ `resource_id` の中で区間が重ならない。判定は「重ならない条件の否定」で、処理の段で作った `overlaps` をそのまま再利用します。
+- **構成**：`POST /bookings`(予約, 201 / 重なれば 409 Conflict)/ `DELETE /bookings/{id}`(キャンセル, 204)/ `GET /resources/{id}/bookings`(一覧, 200)。
+- **スケール対応**：予約が増えたら全件走査 O(N) をやめ、開始時刻でソートして隣接だけ見る(区間木も)。並行制御はリソース単位にロック範囲を閉じる(広いと並行性が落ちる)。永続化と本番の並行制御は DB のトランザクション・制約へ。
+- **運用監視**：予約成功率・重なり拒否(409)率・キャンセル率を計測し、枠の設計を見直す。
+
+**作った道のり**
+
+一番単純な形から、段階的に育てていきます。
+
+- まず一番単純な形：単一リソースの重なり判定(処理の段の `overlaps` を再利用)。
+- 次に広げる：複数リソース + データモデル(`Booking`)+ キャンセル。
+- 最後に本番へ：二重予約(確認してから追加する間に割り込まれる問題)を、プロセス内ロックで防止 + API 化(409)。
+
+```python
+import threading
+from dataclasses import dataclass
+
+# ── まず一番単純な形：単一リソースの重なり判定 ──
+class RoomCalendar:
+    def __init__(self): self._bookings = []
+    def book(self, start, end):
+        for s, e in self._bookings:
+            if overlaps(start, end, s, e): return False   # 重なれば拒否
+        self._bookings.append((start, end)); return True
+
+# ── 次に広げる：エンティティを起こし、複数リソース＋キャンセル ──
+@dataclass
+class Booking:
+    id: int; resource_id: str; start: int; end: int
+
+class BookingService:
+    def __init__(self): self._by_resource = {}; self._next_id = 1
+    def book(self, resource_id, start, end):
+        for b in self._by_resource.get(resource_id, []):
+            if overlaps(start, end, b.start, b.end): return None   # 同じ部屋で重なれば拒否
+        b = Booking(self._next_id, resource_id, start, end); self._next_id += 1
+        self._by_resource.setdefault(resource_id, []).append(b); return b
+    def cancel(self, booking_id):
+        for lst in self._by_resource.values():
+            for i, b in enumerate(lst):
+                if b.id == booking_id: del lst[i]; return True
+        return False
+    def bookings_of(self, resource_id):
+        return sorted(self._by_resource.get(resource_id, []), key=lambda b: b.start)
+
+# ── 最後に本番へ：book/cancel をロックで包むだけ（差分はロックのみ）──
+class SafeBookingService(BookingService):
+    def __init__(self): super().__init__(); self._lock = threading.Lock()
+    def book(self, resource_id, start, end):
+        with self._lock: return super().book(resource_id, start, end)   # 確認〜追加を不可分に
+    def cancel(self, booking_id):
+        with self._lock: return super().cancel(booking_id)
+
+# ── API：最小ルータで公開（重なり = 409 Conflict）──
+def make_booking_api(service):                 # 公開の段の Router を使う
+    r = Router()
+    def create(params, body):
+        b = service.book(body["resource_id"], body["start"], body["end"])
+        return (409, {"error": "conflict"}) if b is None else (201, {"id": b.id})
+    def cancel(params, body):
+        return (204, None) if service.cancel(int(params["id"])) else (404, None)
+    r.add("POST", "/bookings", create)
+    r.add("DELETE", "/bookings/{id}", cancel)
+    return r
+```
+
+ポイントは、本番版でやることが「ロックを足すだけ」だという点です。
+`SafeBookingService` は `BookingService` を継承し、`book` と `cancel` をロックで包むことで、確認から追加までを不可分にしています。
+これで、20 スレッドが同じ枠を同時に狙っても、成功するのは 1 件だけになります(二重予約が起きない)。
+
+ただしプロセス内ロックは 1 台の中でしか効きません。
+複数台に増えると破綻するので、永続化と本番の並行制御は DB 側に任せます。これが次の EC 在庫のケースにつながります。
 
 ### ケーススタディ: EC 在庫（ロードマップ形式）
 
-<!-- メモ: 商品を在庫つきで扱い、複数商品をまとめて注文。希少資源=個数(在庫カウント)、核=データ設計。予約と対になるケース。型で設計(①要件=在庫管理/注文/合計、決済配送やらない、売り越さない=在庫が負にならない・注文金額確定=強い ②機能=在庫つき商品/注文〔在庫足りれば確保、1つでも足りなければ何も売らない=中心〕/合計/参照 ③データ設計★主役=Customer/Product(価格・在庫)/Order/OrderItem(数量・単価)、顧客1対多注文・注文1対多明細・商品1対多明細、OrderItem は属性を持つ中間エンティティ、不変条件=在庫≥0/合計=Σ(数量×単価) は明細から導出/単価は注文時点スナップショット ④構成=POST /orders 201/在庫不足 409、GET /products/{id} ⑤スケール=在庫を別テーブル・行ロックで競合範囲を狭める、商品IDでシャーディング、カート=予約在庫〔TTL 付き hold〕 ⑥運用=成功率/在庫不足409率/在庫切れ商品)。作った道のり=まず単純(単一商品 在庫≥0)→中心(注文/明細を厳密にデータ設計、全明細を確認してから減らす=原子性の芽)→本番へ(sqlite で実DB化、CHECK+条件付き減算 UPDATE...WHERE stock>=? +トランザクションで売り越し防止+API化)。【図: place_order 分岐 flowchart トランザクション→条件付き減算→更新0行?→全ロールバック409/スナップショット→残り?→commit201】。実装: Inventory.buy→Shop.place_order(メモリ版、確認してから減らす)→OrderDB.place_order(条件付き減算+rowcount==0 で InsufficientStock+スナップショット)。 -->
+商品を在庫つきで扱い、顧客が複数商品をまとめて注文するサービスです。
+希少な資源は個数(在庫のカウント)で、核になるのはデータ設計です。予約システムと対になるケースです。
+
+**型で設計**
+
+- **要件確認**：商品を在庫つきで扱い、複数商品をまとめて注文し、合計を出す。売り越さない。やること=在庫管理・注文・合計、やらない=決済・配送。注文(書き)と参照(読み)の両方。一貫性=在庫が負にならない(強い)/ 注文金額は確定。
+- **機能洗い出し**：在庫つきの商品を扱う(各商品は価格と在庫数を持つ)/ 注文する(複数商品をまとめて。在庫が足りれば確保して注文を作り、1 つでも足りなければ何も売らない。中心機能)/ 注文合計を出す / 商品(在庫)を参照する。
+- **データ設計(このケースの主役)**：エンティティは Customer(顧客)/ Product(商品：価格・在庫)/ Order(注文)/ OrderItem(注文明細：数量・単価)。関係は顧客 1 対多 注文、注文 1 対多 明細、商品 1 対多 明細。OrderItem は Order と Product をつなぐ属性を持つ中間エンティティです(構造は持ち方の段の ER 図と同じで、商品に在庫列が加わる形)。不変条件は、在庫 ≥ 0 / 注文合計 = Σ(数量 × 単価)は明細から導出 / 単価は注文時点のスナップショット。
+- **構成**：`POST /orders`(注文, 201 / 在庫不足なら 409)/ `GET /products/{id}`(在庫参照, 200)。
+- **スケール対応**：在庫を別テーブル・行ロックで競合範囲を狭める(「在庫だけ Redis」構成も)。商品 ID でシャーディング(ホット商品の在庫が単一障害点になりやすい)。カートは予約在庫(TTL 付きの hold)。
+- **運用監視**：注文成功率・在庫不足(409)率・在庫切れ商品を計測し、発注や在庫配置を見直す。
+
+**作った道のり**
+
+- まず一番単純な形：単一商品の在庫(不変条件 在庫 ≥ 0)。
+- 中心(データ設計 = 主役)：注文・明細を厳密にデータ設計する(属性を持つ中間エンティティ・単価スナップショット・合計は明細から導出・全明細を確認してから減らす = 原子性の芽)。
+- 最後に本番へ：sqlite で実 DB 化。CHECK 制約 + 条件付き減算 + トランザクションで売り越しを防ぐ + API 化。
+
+本番版の注文処理は、トランザクションの中で「条件付き減算 → 1 つでも不足なら全ロールバック」を回します。
+
+```mermaid
+flowchart TB
+    A["place_order（明細リスト）"] --> B["トランザクション開始"]
+    B --> C["1明細：条件付き減算<br/>UPDATE ... WHERE stock >= ?"]
+    C --> D{"更新0行<br/>（在庫不足）?"}
+    D -->|はい| E["全ロールバック → 409 在庫不足"]
+    D -->|いいえ| F["単価をスナップショット保存"]
+    F --> G{"残りの明細あり?"}
+    G -->|あり| C
+    G -->|なし| H["注文・明細を作成 → commit → 201"]
+```
+
+```python
+# 最初の核：減らす前に確認（不変条件 在庫 >= 0）
+class Inventory:
+    def buy(self, quantity):
+        if quantity <= 0 or self._stock < quantity: return False   # 足りなければ売らない
+        self._stock -= quantity; return True
+
+# 中心（データ設計＝主役）：注文・明細をモデリング（メモリ版）
+@dataclass
+class Customer: id: int; name: str
+@dataclass
+class Product:  id: int; name: str; price: int; stock: int     # 価格と在庫を持つ
+@dataclass
+class Order:    id: int; customer_id: int
+@dataclass
+class OrderItem:                                 # Order と Product をつなぐ中間エンティティ
+    order_id: int; product_id: int
+    quantity: int; unit_price: int               # 数量・注文時点の単価（スナップショット）
+
+class Shop:
+    def __init__(self):
+        self.products = {}; self.orders = []; self.order_items = []; self._next_id = 1
+    def place_order(self, customer_id, lines):   # lines: [(product_id, qty)]
+        # 1) まず全明細の在庫を確認（減らす前にチェック＝原子性の芽）
+        for pid, qty in lines:
+            p = self.products.get(pid)
+            if p is None or qty <= 0 or p.stock < qty: return None   # 1つでも不足なら何も売らない
+        # 2) 全部OKなら在庫を減らし、注文＋明細を作る（単価は今の価格を確定）
+        order = Order(self._next_id, customer_id); self._next_id += 1
+        self.orders.append(order)
+        for pid, qty in lines:
+            p = self.products[pid]; p.stock -= qty
+            self.order_items.append(OrderItem(order.id, pid, qty, unit_price=p.price))
+        return order
+    def order_total(self, order_id):             # 合計は明細から導出（重複して持たない）
+        return sum(it.quantity * it.unit_price for it in self.order_items
+                   if it.order_id == order_id)
+
+# 本番版：DB で不変条件を守る2段構え + トランザクション
+SCHEMA = """
+CREATE TABLE products (
+  id INTEGER PRIMARY KEY, name TEXT NOT NULL, price INTEGER NOT NULL,
+  stock INTEGER NOT NULL CHECK (stock >= 0)   -- ② 最後の砦：どの経路からも負にできない
+);
+-- orders / order_items（外部キー付き）は省略
+"""
+class OrderDB:
+    def place_order(self, customer_id, lines):
+        for _, qty in lines:
+            if qty <= 0: raise ValueError("invalid quantity")
+        try:
+            with self.conn:                     # トランザクション（途中失敗で全ロールバック）
+                snapshots = []
+                for product_id, qty in lines:
+                    cur = self.conn.execute(    # ① 条件付き減算：足りる行だけ更新される
+                        "UPDATE products SET stock = stock - ? WHERE id = ? AND stock >= ?",
+                        (qty, product_id, qty))
+                    if cur.rowcount == 0:       # 更新0行 = 在庫不足 → ロールバック
+                        raise InsufficientStock(product_id)
+                    price = self.conn.execute("SELECT price FROM products WHERE id=?",
+                                              (product_id,)).fetchone()[0]
+                    snapshots.append((product_id, qty, price))   # 単価スナップショット
+                cur = self.conn.execute("INSERT INTO orders(customer_id) VALUES(?)",
+                                        (customer_id,))
+                order_id = cur.lastrowid
+                for product_id, qty, price in snapshots:
+                    self.conn.execute("INSERT INTO order_items"
+                        "(order_id,product_id,quantity,unit_price) VALUES(?,?,?,?)",
+                        (order_id, product_id, qty, price))
+            return order_id
+        except InsufficientStock:
+            return None                         # API では 409 を返す
+```
+
+本番版のポイントは、在庫を 2 段構えで守っていることです。
+1 つは条件付き減算 `UPDATE ... WHERE stock >= ?` で、足りる行だけが更新され、足りなければ更新 0 行になります。これを検知したらトランザクションごとロールバックし、1 つでも足りなければ何も売りません。
+もう 1 つが CHECK 制約 `stock >= 0` で、どんな経路から書いても在庫を負にできない最後の砦です。
+単価は減算のたびにスナップショットとして控え、注文合計は明細から導出します。
 
 ### 予約と EC の対比
 
-<!-- メモ: 記事に必ず入れる対比表。予約=希少資源:時間帯(区間)/核:区間の重なり・並行制御/並行制御:プロセス内ロック/主に関わる段:処理の段・信頼性の段。EC=希少資源:個数(カウント)/核:データ設計(関係・不変条件)/並行制御:DB のトランザクション+制約/主に関わる段:持ち方の段。メッセージ=「守りたい不変条件は何か」を見極めるとモデリングも処理も自然に決まる。時間の希少性と個数の希少性という2典型。 -->
+予約システムと EC 在庫は、どちらも「取り合いになる資源をどう守るか」という同じ問題ですが、守り方はかなり違います。並べてみます。
 
-## まとめ・学んだこと
+| | 予約システム | EC 在庫 |
+|---|---|---|
+| 希少資源 | 時間帯(区間) | 個数(カウント) |
+| 核 | 区間の重なり・並行制御 | データ設計(関係・不変条件) |
+| 並行制御 | プロセス内ロック | DB のトランザクション + 制約 |
+| 主に関わる段 | 処理の段(区間)・信頼性の段(並行処理) | 持ち方の段(モデリング・DB) |
 
-<!-- メモ: 段階で捉えるとどこに手を入れるか・何が足りないかが見える。標準ライブラリで自前実装するとフレームワークが隠していた仕組み(索引・トランザクション・ルーティング・ハンドシェイク)が腑に落ちる。データ設計が起点、ただし処理が核のドメイン(予約)もある=「不変条件は何か」で見極める。並行制御は避けて通れない(ロック/DBのトランザクション・制約/そもそも共有しない)。設計は型で進めると思いつきに飛びつかず判断の理由を残せる。 -->
+言いたいのは、「守りたい不変条件は何か」を見極めると、モデリングも処理も自然に決まる、ということです。
+時間の希少性(重ならない)と、個数の希少性(負にしない)。この 2 つは、資源の取り合いをどう防ぐかの典型的な 2 パターンでした。
 
 ## おわりに
 
-<!-- メモ: ことわり・免責。この整理は Claude Code と対話しながら進めた(設計判断や実装方針に Claude の提案が多く入っている)。そのためベストプラクティスと断定はできない箇所があるかも、誤り・より良いやり方の指摘は歓迎。あくまで「ML畑の自分がサービス開発の基礎を体系化するための学習ノート」でプロダクションの正解集ではない。今後の展望(アルゴリズム系の穴埋め=N+1問題・two-pointer/sliding window、ケース追加=SNSタイムライン〔fan-out・グラフ〕・チャット〔リアルタイム通信〕)。リポジトリ(全実装・全テスト): github.com/atsushi11o7/cs-fundamentals-practice。 -->
+この整理を通して見えてきたことを並べます。
+
+- **段階で捉える**と、どこに手を入れるか・何が足りないかが見えます。
+- **データ設計が起点**。ただし処理が核になるドメイン(予約)もあり、そこは「不変条件は何か」で見極めます。
+- **並行制御は避けて通れない**。ロック / DB のトランザクション・制約 / そもそも共有しない、のいずれかで守ります。
+- **設計は型で進める**と、思いつきに飛びつかず、判断の理由を残せます。
+
+最後に、いくつかことわりを書いておきます。
+
+この整理は、学生時代に勉強したうろ覚えの知識と、Claude Code との対話を元に進めました。
+設計の判断や実装の方針には Claude の提案が多く入っていて、そのためベストプラクティスと断定はできない箇所があるかもしれません。
+あくまで、機械学習畑の自分がサービス開発の基礎を体系化するための学習ノートであって、プロダクションの正解集ではありません。
+
+全実装と全テストは、次のリポジトリに置いています。
+https://github.com/atsushi11o7/cs-fundamentals-practice
 

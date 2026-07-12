@@ -2,16 +2,18 @@
 title: Dev Container + Dockerfile で作る GPU 対応 Python 機械学習環境
 tags:
   - Python
-  - Docker
-  - DevContainer
-  - PyTorch
   - CUDA
+  - Docker
+  - PyTorch
+  - devcontainer
 private: false
-updated_at: '2025-08-03T17:57:37+09:00'
+updated_at: '2026-07-13T01:08:55+09:00'
 id: 694e878558c7a63912bf
 organization_url_name: null
 slide: false
 ignorePublish: false
+posting_campaign_uuid: null
+agreed_posting_campaign_term: false
 ---
 
 ## 概要

@@ -1,13 +1,13 @@
 ---
 title: GraphRAG を LightRAG で試してみた - Qiita 記事からナレッジグラフを作って検索・可視化する
 tags:
+  - GraphRAG
+  - LightRAG
   - Python
   - rag
   - ナレッジグラフ
-  - GraphRAG
-  - LightRAG
 private: false
-updated_at: '2026-07-12T21:21:55+09:00'
+updated_at: '2026-07-19T22:40:42+09:00'
 id: a7269731cdef46c87434
 organization_url_name: null
 slide: false

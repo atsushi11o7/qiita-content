@@ -7,13 +7,13 @@ tags:
   - 生成AI
   - 自然言語処理
 private: false
-updated_at: '2026-07-19T22:40:42+09:00'
+updated_at: '2026-07-26T23:46:17+09:00'
 id: 44fe6858a17cd5d9d09e
 organization_url_name: null
 slide: false
 ignorePublish: false
-posting_campaign_uuid: null
-agreed_posting_campaign_term: false
+posting_campaign_uuid: de8f4a0a54ab4d37707c
+agreed_posting_campaign_term: true
 ---
 ## はじめに
 

@@ -3,15 +3,17 @@ title: 強化学習の基礎を、Gymnasium を使って整理する（バンデ
 tags:
   - 強化学習
   - Python
-  - Gymnasium
+  - gymnasium
   - DQN
   - 機械学習
 private: false
-updated_at: ''
-id: null
+updated_at: '2026-07-26T23:46:18+09:00'
+id: 60832227a5e1f18e1786
 organization_url_name: null
 slide: false
 ignorePublish: false
+posting_campaign_uuid: null
+agreed_posting_campaign_term: false
 ---
 
 ## はじめに

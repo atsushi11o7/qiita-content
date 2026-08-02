@@ -19,6 +19,6 @@
   },
   "homepage": "https://github.com/atsushi11o7/qiita-content#readme",
   "devDependencies": {
-    "@qiita/qiita-cli": "^1.8.0"
+    "@qiita/qiita-cli": "^1.10.0"
   }
 }

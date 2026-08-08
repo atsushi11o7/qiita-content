@@ -1,14 +1,14 @@
 ---
 title: お盆に実家へ帰っても自宅の ML サーバーを使いたくて Tailscale を導入した
 tags:
-  - Tailscale
+  - tailscale
   - VPN
   - 自宅サーバー
   - SSH
   - 機械学習
 private: false
-updated_at: ''
-id: null
+updated_at: '2026-08-09T02:23:02+09:00'
+id: f28ce268f7c563e2a534
 organization_url_name: null
 slide: false
 ignorePublish: false

@@ -102,9 +102,86 @@ EDAC は Linux のメモリエラー報告の仕組みで、ECC 対応機なら�
 
 これが嬉しいのは、答え合わせ用に「書いたはずの値」を別のバッファに取っておかなくて済むからです。読み戻すときに種から数列を作り直せば、期待値はその場で分かります。メモリを二重に持たなくてよいので、同じ搭載量でもテストできる範囲が倍になります。
 
-8 スレッド・各 900MB で走らせると、こうなりました。
+コード全体は次のとおりです（`sudo` は不要です）。
+
+```c
+/* メモリの書き込み/読み戻しを検証し、不良領域の有無を確認する。
+ *
+ *   gcc -O2 -pthread -o memtest memtest.c
+ *   ./memtest [スレッド数] [1スレッドあたりMB]      既定: 1 7200
+ *
+ * 「不一致 0 件」なら、その確保量では不良領域に触れていない。
+ */
+#include <pthread.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <time.h>
+
+static int threads = 1;
+static int mb_per_thread = 7200;
+static const int passes = 6;
+
+static volatile long errors = 0;
+static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+
+/* xorshift64。同じ seed から同じ列を再生成できるので、書いた値と読んだ値を
+   バッファを 2 つ持たずに比較できる。 */
+static inline uint64_t next(uint64_t v) {
+    v ^= v << 13;
+    v ^= v >> 7;
+    v ^= v << 17;
+    return v;
+}
+
+static void *worker(void *arg) {
+    long id = (long)arg;
+    size_t n = (size_t)mb_per_thread * 1024 * 1024 / sizeof(uint64_t);
+    uint64_t *buf = malloc(n * sizeof(uint64_t));
+    if (!buf) {
+        fprintf(stderr, "  thread %ld: %dMB の確保に失敗\n", id, mb_per_thread);
+        return NULL;
+    }
+    for (int pass = 0; pass < passes; pass++) {
+        uint64_t seed = 0x9E3779B97F4A7C15ULL * (pass + 1) + id;
+        uint64_t v = seed;
+        for (size_t i = 0; i < n; i++) buf[i] = (v = next(v));
+        v = seed;
+        for (size_t i = 0; i < n; i++) {
+            v = next(v);
+            if (buf[i] == v) continue;
+            pthread_mutex_lock(&lock);
+            if (++errors <= 5)
+                fprintf(stderr, "  不一致 thread=%ld pass=%d offset=%zu 期待=%llx 実際=%llx\n",
+                        id, pass, i, (unsigned long long)v, (unsigned long long)buf[i]);
+            pthread_mutex_unlock(&lock);
+        }
+    }
+    free(buf);
+    return NULL;
+}
+
+int main(int argc, char **argv) {
+    if (argc > 1) threads = atoi(argv[1]);
+    if (argc > 2) mb_per_thread = atoi(argv[2]);
+    pthread_t *t = malloc(sizeof(pthread_t) * threads);
+    if (!t) return 2;
+    printf("%dスレッド x %dMB x %dパス (合計 %.1f GB を読み書き)\n", threads, mb_per_thread,
+           passes, (double)threads * mb_per_thread * passes / 1024.0);
+    fflush(stdout);
+    time_t start = time(NULL);
+    for (long i = 0; i < threads; i++) pthread_create(&t[i], NULL, worker, (void *)i);
+    for (int i = 0; i < threads; i++) pthread_join(t[i], NULL);
+    printf("完了: %ld秒  不一致 %ld 件\n", (long)(time(NULL) - start), errors);
+    free(t);
+    return errors ? 1 : 0;
+}
+```
+
+これをコンパイルして、8 スレッド・各 900MB で走らせます。
 
 ```sh
+gcc -O2 -pthread -o memtest memtest.c
 ./memtest 8 900        # 8スレッド x 900MB
 ```
 
@@ -132,9 +209,107 @@ EDAC は Linux のメモリエラー報告の仕組みで、ECC 対応機なら�
 
 壊れているのが固定の場所なら、その物理アドレスを突き止めれば、そこだけ使わないようにできます。
 
-Linux では `/proc/self/pagemap` を読むと、プログラムが見ている仮想アドレスが、実際の物理メモリのどこに載っているかを調べられます。これを使って、memtest で不一致が出たアドレスの物理位置を求めるプログラム（`phys`）を書きました。物理アドレスの読み取りには root 権限が要るので、`sudo` で実行します。
+Linux では `/proc/self/pagemap` を読むと、プログラムが見ている仮想アドレスが、実際の物理メモリのどこに載っているかを調べられます。これを使って、memtest で不一致が出たアドレスの物理位置を求めるプログラム（`phys`）を書きました。
+
+```c
+/* 不良メモリ領域の物理アドレスを特定する。
+ *
+ * /proc/self/pagemap から物理ページ番号を読むため、ホスト側で root として
+ * 実行すること。コンテナ内や一般ユーザでは、ページ番号が 0 にマスクされて
+ * 物理アドレスが得られない。
+ *
+ *   gcc -O2 -o phys phys.c
+ *   sudo ./phys [MB]        既定: 7200
+ */
+#include <fcntl.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <unistd.h>
+
+#define PAGEMAP_PRESENT (1ULL << 63)
+#define PAGEMAP_PFN_MASK ((1ULL << 55) - 1)
+
+/* 仮想アドレスに対応する物理アドレス。読めない場合は 0。 */
+static uint64_t physical_address(int pagemap_fd, void *addr) {
+    long page_size = sysconf(_SC_PAGESIZE);
+    uint64_t entry = 0;
+    uint64_t virtual_page = (uint64_t)addr / page_size;
+    if (pread(pagemap_fd, &entry, sizeof(entry), virtual_page * sizeof(entry)) != sizeof(entry))
+        return 0;
+    if (!(entry & PAGEMAP_PRESENT)) return 0;
+    return (entry & PAGEMAP_PFN_MASK) * page_size + (uint64_t)addr % page_size;
+}
+
+static inline uint64_t next(uint64_t v) {
+    v ^= v << 13;
+    v ^= v >> 7;
+    v ^= v << 17;
+    return v;
+}
+
+int main(int argc, char **argv) {
+    int mb = argc > 1 ? atoi(argv[1]) : 7200;
+    size_t n = (size_t)mb * 1024 * 1024 / sizeof(uint64_t);
+    uint64_t *buf = malloc(n * sizeof(uint64_t));
+    if (!buf) {
+        printf("%dMB の確保に失敗\n", mb);
+        return 2;
+    }
+    int pagemap_fd = open("/proc/self/pagemap", O_RDONLY);
+    if (pagemap_fd < 0) {
+        printf("/proc/self/pagemap を開けません。root で実行してください\n");
+        return 3;
+    }
+
+    const uint64_t seed = 0x9E3779B97F4A7C15ULL;
+    uint64_t v = seed;
+    for (size_t i = 0; i < n; i++) buf[i] = (v = next(v));
+
+    /* 物理アドレスは連続しないので、ページ単位で最小・最大を集計する。 */
+    long page_size = sysconf(_SC_PAGESIZE);
+    uint64_t lowest = 0, highest = 0;
+    long count = 0, shown = 0;
+    v = seed;
+    for (size_t i = 0; i < n; i++) {
+        v = next(v);
+        if (buf[i] == v) continue;
+        uint64_t physical = physical_address(pagemap_fd, &buf[i]);
+        if (!physical) {
+            printf("物理アドレスを読めません(権限不足)。ホスト側で root として実行してください\n");
+            return 3;
+        }
+        if (!count || physical < lowest) lowest = physical;
+        if (physical > highest) highest = physical;
+        count++;
+        if (shown++ < 5)
+            printf("  仮想 %p -> 物理 0x%llx\n", (void *)&buf[i], (unsigned long long)physical);
+    }
+    close(pagemap_fd);
+
+    if (!count) {
+        printf("%dMB: 不一致なし(この確保量では不良領域に触れていない)\n", mb);
+        free(buf);
+        return 0;
+    }
+
+    uint64_t first_page = lowest & ~(uint64_t)(page_size - 1);
+    uint64_t last_page = highest & ~(uint64_t)(page_size - 1);
+    uint64_t span_kb = (last_page - first_page + page_size) / 1024;
+    printf("\n不一致 %ld 件\n", count);
+    printf("物理アドレス範囲: 0x%llx 〜 0x%llx\n", (unsigned long long)lowest,
+           (unsigned long long)highest);
+    printf("該当ページ: 0x%llx から %llu KB (%llu ページ)\n", (unsigned long long)first_page,
+           (unsigned long long)span_kb, (unsigned long long)(span_kb * 1024 / page_size));
+    free(buf);
+    return 1;
+}
+```
+
+物理アドレスの読み取りには root 権限が要るので、コンパイルして `sudo` で実行します。
 
 ```sh
+gcc -O2 -o phys phys.c
 sudo ./phys 7200
 ```
 
@@ -197,7 +372,7 @@ memmap=1M
 
 起動できたらすぐ `/etc/default/grub` から該当行を消し、`update-grub` し直します。
 
-教訓は 2 つです。1 つは、`memmap=` を入れた再起動は画面に触れる状態でやること。コンシューマ向けのマザーボードには遠隔で画面を操作する仕組み（IPMI など）が無いので、遠隔でしくじると詰みます。もう 1 つは、どうしても `memmap=` を使うなら `$` を二重にエスケープし、`update-grub` の後に `grub.cfg` を開いて `$` が残っているか目で確認してから再起動すること。これを怠ったのが今回の失敗でした。
+結局 `memmap=` は諦め、今は起動時に `soft_offline_page` を自動で叩く systemd の oneshot サービスを置いて、再起動のたびに問題の 32KB を隔離し直すようにしました。
 
 ## おわりに
 

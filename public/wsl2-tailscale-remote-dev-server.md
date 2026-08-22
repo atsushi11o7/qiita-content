@@ -124,7 +124,13 @@ Windows 側から `wsl --shutdown` を実行して WSL を再起動すれば反�
 
 Docker は、最初 Docker Desktop の WSL Integration を使っていました。ただ、SSH 経由で WSL に入った場合に `docker` コマンドがうまく機能しないことがありました。Docker Desktop 自体が GPU に対応していないわけではないのですが、Windows の GUI セッションや Docker Desktop の起動状態への依存をできるだけ減らし、無人の SSH サーバーとして扱いやすくするために、WSL の中に Docker Engine を直接入れる方針に変えました。
 
-Docker 公式の手順で、WSL の Ubuntu に Docker Engine を導入します。一般ユーザーで使えるようにしておきます。
+Docker 公式のスクリプトで、WSL の Ubuntu に Docker Engine を導入します。
+
+```bash
+curl -fsSL https://get.docker.com | sudo sh
+```
+
+一般ユーザーでも使えるようにしておきます。
 
 ```bash
 sudo usermod -aG docker $USER
@@ -141,10 +147,11 @@ systemctl status docker
 
 （Docker Desktop を使っていた名残で、`~/.docker/config.json` に `"credsStore": "desktop.exe"` が残っていると Engine 直接運用の妨げになることがあるので削除しました。）
 
-最後に、Docker コンテナから GPU を使えるようにします（Windows 側に WSL2 対応の NVIDIA ドライバを導入済みであることが前提です）。NVIDIA Container Toolkit を導入します。
+最後に、Docker コンテナから GPU を使えるようにします（Windows 側に WSL2 対応の NVIDIA ドライバを導入済みであることが前提です）。NVIDIA Container Toolkit を、[公式のインストールガイド](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/latest/install-guide.html)に従って導入します。
+
+導入後、Docker から使えるように設定します。
 
 ```bash
-sudo apt install -y nvidia-container-toolkit
 sudo nvidia-ctk runtime configure --runtime=docker
 sudo systemctl restart docker
 ```

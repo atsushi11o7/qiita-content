@@ -2,13 +2,13 @@
 title: WSL2 + Tailscale で、外出先から使える Linux ライクな GPU サーバーを作る
 tags:
   - WSL2
-  - Tailscale
+  - tailscale
   - SSH
   - Docker
   - Windows
 private: false
-updated_at: ''
-id: null
+updated_at: '2026-08-23T02:53:49+09:00'
+id: 47bb5ed5f9c8dc3095f4
 organization_url_name: null
 slide: false
 ignorePublish: false

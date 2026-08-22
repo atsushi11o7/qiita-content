@@ -38,7 +38,11 @@ https://qiita.com/atsushi11o7/items/f28ce268f7c563e2a534
 
 ## Tailscale で接続できるようにする
 
-まず、Windows に Tailscale をインストールし、Mac など既存の端末と同じアカウントに参加させます。Windows 版はタスクトレイに常駐するタイプです。
+まず、Windows に Tailscale をインストールし、Mac など既存の端末と同じアカウントに参加させます。
+
+https://tailscale.com/download/windows
+
+こちらからインストーラをダウンロードし、実行します。インストール後にサインインを求められるので、Mac など既存の端末と同じアカウントでログインします。Windows 版はタスクトレイに常駐するタイプです。
 
 なお、Mac 側に Tailscale を導入する手順に関しては[前回の記事](https://qiita.com/atsushi11o7/items/f28ce268f7c563e2a534)を参考にしてください。
 

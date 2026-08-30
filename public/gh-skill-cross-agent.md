@@ -2,13 +2,13 @@
 title: Claude Code と Codex で使い回せる Skill 環境を整えた話
 tags:
   - ClaudeCode
-  - Codex
+  - codex
   - SKILLS
   - GitHub
-  - gh
+  - GH
 private: false
-updated_at: ''
-id: null
+updated_at: '2026-08-30T23:20:45+09:00'
+id: 85e409cbc4e6ea22f6c9
 organization_url_name: null
 slide: false
 ignorePublish: false

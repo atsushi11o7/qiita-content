@@ -1,14 +1,14 @@
 ---
 title: PyTorch しか使ったことがなかった自分が、シミュレータの高速化で JAX の vmap を使用してみた話
 tags:
-  - JAX
+  - jax
   - PyTorch
   - Python
   - GPU
   - 機械学習
 private: false
-updated_at: ''
-id: null
+updated_at: '2026-09-06T14:47:02+09:00'
+id: 0bf94ff412c035aaa22d
 organization_url_name: null
 slide: false
 ignorePublish: false

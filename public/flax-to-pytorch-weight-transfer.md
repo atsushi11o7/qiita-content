@@ -1,14 +1,14 @@
 ---
 title: JAX で学習した Transformer の重みを PyTorch に移植する
 tags:
-  - JAX
+  - jax
   - PyTorch
-  - Flax
+  - flax
   - Transformer
   - 機械学習
 private: false
-updated_at: ''
-id: null
+updated_at: '2026-09-13T01:41:24+09:00'
+id: 52c41cbfad40fee67992
 organization_url_name: null
 slide: false
 ignorePublish: false

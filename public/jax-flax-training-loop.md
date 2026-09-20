@@ -1,14 +1,14 @@
 ---
 title: JAX/Flax の学習ループを実装する上で学んだことまとめ
 tags:
-  - JAX
-  - Flax
+  - jax
+  - flax
   - Python
   - 機械学習
   - MNIST
 private: false
-updated_at: ''
-id: null
+updated_at: '2026-09-20T23:56:45+09:00'
+id: cab1ce788af1e05b9d86
 organization_url_name: null
 slide: false
 ignorePublish: false

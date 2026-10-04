@@ -7,7 +7,7 @@ tags:
   - rag
   - LLM
 private: false
-updated_at: '2026-09-27T16:44:47+09:00'
+updated_at: '2026-10-04T23:53:20+09:00'
 id: 6edc6432c85f47fe8562
 organization_url_name: null
 slide: false

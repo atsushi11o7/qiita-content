@@ -2,13 +2,13 @@
 title: Pythonプロジェクト、どこに何を置く？ - 構成の考え方と実例
 tags:
   - Python
-  - uv
-  - DevContainer
+  - UV
+  - devcontainer
   - 機械学習
   - プロジェクト管理
 private: false
-updated_at: ''
-id: null
+updated_at: '2026-11-08T23:53:58+09:00'
+id: 1f8d1d01fad57e906199
 organization_url_name: null
 slide: false
 ignorePublish: false

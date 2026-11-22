@@ -5,10 +5,10 @@ tags:
   - 機械学習
   - 回帰
   - 評価指標
-  - LightGBM
+  - lightgbm
 private: false
-updated_at: ''
-id: null
+updated_at: '2026-11-22T21:34:32+09:00'
+id: a80de17acaf7d70bc153
 organization_url_name: null
 slide: false
 ignorePublish: false
